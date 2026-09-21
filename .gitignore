@@ -16,6 +16,7 @@ venv/
 *.db-journal
 *.db-wal
 *.db-shm
+test_*.db*
 
 # Node
 node_modules/

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import base64
 import re
-from typing import Any
 
 import httpx
 
@@ -13,16 +12,19 @@ from app.config import settings
 
 class GitHubClient:
     def __init__(self, token: str | None = None, owner: str | None = None, repo: str | None = None):
-        self.token = token or settings.GITHUB_TOKEN
+        self.token = token if token is not None else settings.GITHUB_TOKEN
         self.owner = owner
         self.repo = repo
+        headers = {
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        }
+        # Skip placeholder / empty tokens — they make public API calls 401
+        if self.token and self.token.startswith(("ghp_", "github_pat_")) and "YOUR_" not in self.token:
+            headers["Authorization"] = f"Bearer {self.token}"
         self._client = httpx.AsyncClient(
             base_url="https://api.github.com",
-            headers={
-                "Authorization": f"Bearer {self.token}",
-                "Accept": "application/vnd.github+json",
-                "X-GitHub-Api-Version": "2022-11-28",
-            },
+            headers=headers,
             timeout=30.0,
         )
 

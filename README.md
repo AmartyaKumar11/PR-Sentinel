@@ -34,9 +34,16 @@ python tests/test_analysis.py
 Shipped so far:
 
 - M-01 health
-- M-02 webhook HMAC + filter (agent stub)
-- M-03 GitHub client
+- M-02 webhook HMAC + filter (agent stub) — acceptance tested
+- M-03 GitHub client + tool registry — mocked + live README fetch
 - M-04 / M-05 / M-06 dep graph, diff parser, blast radius
 - Task / review / SSE routes (empty until agent persists tasks)
+
+```powershell
+cd backend
+$env:PYTHONPATH = (Get-Location).Path
+python tests/test_analysis.py
+python tests/test_day2.py
+```
 
 Next: agent DIAGNOSE → TRIAGE → DISPATCH (M-07..M-09).

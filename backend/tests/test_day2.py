@@ -1,0 +1,273 @@
+"""Day-2 acceptance: webhook HMAC + GitHub client (mocked HTTP)."""
+
+from __future__ import annotations
+
+import hashlib
+import hmac
+import json
+from pathlib import Path
+
+import httpx
+import pytest
+from httpx import ASGITransport, AsyncClient, MockTransport, Response
+
+# Ensure app imports resolve
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from app.config import settings
+from app.main import app
+from app.services.github_client import GitHubClient, _find_issue_number
+from app.agent.tools.github_tools import register_github_tools
+from app.agent.tools.registry import ToolRegistry
+
+
+def _sign(body: bytes) -> str:
+    return "sha256=" + hmac.new(
+        settings.GITHUB_WEBHOOK_SECRET.encode(), body, hashlib.sha256
+    ).hexdigest()
+
+
+def _pr_payload(action: str = "opened", pr: int = 1, sha: str = "abc123") -> bytes:
+    return json.dumps(
+        {
+            "action": action,
+            "pull_request": {
+                "number": pr,
+                "body": "Fixes #1",
+                "head": {"sha": sha, "ref": "feature/1-password-reset"},
+            },
+            "repository": {"full_name": "AmartyaKumar11/PR-Sentinel"},
+        }
+    ).encode()
+
+
+@pytest.mark.asyncio
+async def test_webhook_valid_returns_202():
+    body = _pr_payload()
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        r = await client.post(
+            "/api/webhook/github",
+            content=body,
+            headers={
+                "Content-Type": "application/json",
+                "X-GitHub-Event": "pull_request",
+                "X-Hub-Signature-256": _sign(body),
+            },
+        )
+    assert r.status_code == 202
+    assert "task_id" in r.json()
+
+
+@pytest.mark.asyncio
+async def test_webhook_invalid_sig_401():
+    body = _pr_payload()
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        r = await client.post(
+            "/api/webhook/github",
+            content=body,
+            headers={
+                "Content-Type": "application/json",
+                "X-GitHub-Event": "pull_request",
+                "X-Hub-Signature-256": "sha256=deadbeef",
+            },
+        )
+    assert r.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_webhook_non_pr_skipped():
+    body = _pr_payload()
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        r = await client.post(
+            "/api/webhook/github",
+            content=body,
+            headers={
+                "Content-Type": "application/json",
+                "X-GitHub-Event": "push",
+                "X-Hub-Signature-256": _sign(body),
+            },
+        )
+    assert r.status_code == 200
+    assert r.json()["skipped"] is True
+
+
+@pytest.mark.asyncio
+async def test_webhook_synchronize_reuses_task_id():
+    """opened then synchronize on same PR must reuse task_id (Bug 4)."""
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        # Seed a live task via opened
+        body1 = _pr_payload(action="opened", pr=99, sha="aaa")
+        r1 = await client.post(
+            "/api/webhook/github",
+            content=body1,
+            headers={
+                "Content-Type": "application/json",
+                "X-GitHub-Event": "pull_request",
+                "X-Hub-Signature-256": _sign(body1),
+            },
+        )
+        # Without a DB row, synchronize still mints new id — insert via create_task
+        from app.database import get_db
+        from app.services.task_manager import create_task
+
+        task_id = r1.json()["task_id"]
+        db = await get_db()
+        # May already exist from stub path — only insert if missing
+        cur = await db.execute("SELECT id FROM tasks WHERE id = ?", (task_id,))
+        if not await cur.fetchone():
+            await create_task(
+                db,
+                task_id,
+                "AmartyaKumar11/PR-Sentinel",
+                99,
+                "aaa",
+                "MEDIUM",
+                "dispatch",
+                {"blast_radius": {}, "intent_alignment": {"missing": [], "scope_creep": [], "addressed": []}},
+                {"affected_files_priority": [], "suggested_fix_approach": "n/a"},
+                "review",
+                "prompt",
+            )
+
+        body2 = _pr_payload(action="synchronize", pr=99, sha="bbb")
+        r2 = await client.post(
+            "/api/webhook/github",
+            content=body2,
+            headers={
+                "Content-Type": "application/json",
+                "X-GitHub-Event": "pull_request",
+                "X-Hub-Signature-256": _sign(body2),
+            },
+        )
+    assert r2.status_code == 202
+    assert r2.json()["task_id"] == task_id
+
+
+def test_find_issue_from_body_and_branch():
+    assert _find_issue_number("Closes #12", "main") == 12
+    assert _find_issue_number("", "feature/1-password-reset") == 1
+    assert _find_issue_number("", "fix/2-order-validation") == 2
+    assert _find_issue_number("", "feature/no-issue-billing") is None
+
+
+@pytest.mark.asyncio
+async def test_github_client_four_methods_mocked():
+    def handler(request: httpx.Request) -> Response:
+        path = request.url.path
+        if path.endswith("/pulls/7/files"):
+            return Response(
+                200,
+                json=[
+                    {
+                        "filename": "src/auth.py",
+                        "patch": "@@\n+def reset_password(email):\n+    pass\n",
+                    }
+                ],
+            )
+        if path.endswith("/pulls/7"):
+            return Response(
+                200,
+                json={
+                    "number": 7,
+                    "body": "Implements #3",
+                    "head": {"ref": "feature/3-x", "sha": "fff"},
+                },
+            )
+        if path.endswith("/issues/3"):
+            return Response(
+                200,
+                json={
+                    "number": 3,
+                    "title": "Do the thing",
+                    "body": "- validate\n- expire",
+                    "labels": [{"name": "bug"}],
+                    "state": "open",
+                },
+            )
+        if "/contents/" in path:
+            import base64
+
+            raw = b"def hello():\n    return 1\n"
+            return Response(
+                200,
+                json={"content": base64.b64encode(raw).decode(), "encoding": "base64"},
+            )
+        if path.endswith("/issues/7/comments") and request.method == "POST":
+            return Response(201, json={"id": 555, "html_url": "https://github.com/x/y/issues/7#issuecomment-555"})
+        return Response(404, json={"message": "not found", "path": path})
+
+    transport = MockTransport(handler)
+    gh = GitHubClient(token="fake", owner="o", repo="r")
+    await gh._client.aclose()
+    gh._client = httpx.AsyncClient(
+        base_url="https://api.github.com",
+        transport=transport,
+        headers={"Authorization": "Bearer fake", "Accept": "application/vnd.github+json"},
+    )
+
+    diff = await gh.fetch_pr_diff(7)
+    assert "reset_password" in diff
+    assert "src/auth.py" in diff
+
+    issue = await gh.fetch_linked_issue(7)
+    assert issue is not None
+    assert issue["number"] == 3
+    assert issue["title"] == "Do the thing"
+
+    content = await gh.fetch_file_content("src/auth.py", "main")
+    assert "def hello" in content
+
+    posted = await gh.post_pr_review(7, "## review")
+    assert posted["comment_id"] == 555
+    assert "issuecomment" in posted["url"]
+
+    registry = ToolRegistry()
+    register_github_tools(registry, gh)
+    assert set(registry.names()) == {
+        "fetch_pr_diff",
+        "fetch_linked_issue",
+        "fetch_file_content",
+        "post_pr_review",
+    }
+    tool_diff = await registry.execute("fetch_pr_diff", pr_number=7)
+    assert "reset_password" in tool_diff
+
+    await gh.close()
+
+
+@pytest.mark.asyncio
+async def test_live_fetch_file_from_public_repo():
+    """M-03 smoke against the real public PR-Sentinel repo (no write)."""
+    gh = GitHubClient(token="", owner="AmartyaKumar11", repo="PR-Sentinel")
+    try:
+        text = await gh.fetch_file_content("README.md", "main")
+    except httpx.HTTPStatusError as e:
+        print(f"skip live github: {e}")
+        await gh.close()
+        return
+    await gh.close()
+    assert "PR Sentinel" in text
+
+
+if __name__ == "__main__":
+    import asyncio
+
+    async def _main():
+        await test_webhook_valid_returns_202()
+        await test_webhook_invalid_sig_401()
+        await test_webhook_non_pr_skipped()
+        await test_webhook_synchronize_reuses_task_id()
+        test_find_issue_from_body_and_branch()
+        await test_github_client_four_methods_mocked()
+        await test_live_fetch_file_from_public_repo()
+        print("day2_ok")
+        import os
+        os._exit(0)
+
+    asyncio.run(_main())
