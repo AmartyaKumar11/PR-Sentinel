@@ -1,0 +1,35 @@
+import logging
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+from app.config import settings
+from app.database import close_db, get_db
+from app.routes import health, reviews, stream, tasks, webhook
+
+logging.basicConfig(level=settings.LOG_LEVEL.upper())
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await get_db()
+    yield
+    await close_db()
+
+
+app = FastAPI(title="PR Sentinel", version="0.1.0", lifespan=lifespan)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.cors_origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+app.include_router(health.router)
+app.include_router(webhook.router)
+app.include_router(tasks.router)
+app.include_router(reviews.router)
+app.include_router(stream.router)
