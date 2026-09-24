@@ -23,6 +23,16 @@ from app.agent.tools.github_tools import register_github_tools
 from app.agent.tools.registry import ToolRegistry
 
 
+@pytest.fixture(autouse=True)
+def _dont_run_agent(monkeypatch):
+    """Webhook tests only check HTTP. The real agent deadlocks SQLite and calls APIs."""
+
+    async def _noop(*_a, **_k):
+        return None
+
+    monkeypatch.setattr("app.routes.webhook._agent.run", _noop)
+
+
 def _sign(body: bytes) -> str:
     return "sha256=" + hmac.new(
         settings.GITHUB_WEBHOOK_SECRET.encode(), body, hashlib.sha256
