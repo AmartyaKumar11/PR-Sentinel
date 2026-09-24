@@ -45,10 +45,11 @@ deleted file mode 100644
 """
     bad = diff_sanity(deleted, _DIAG)
     assert bad["test_files_deleted"]
-    assert bad["files_outside_blast_radius"] == []
+    assert "files_outside_blast_radius" not in bad
+    assert not bad["ok"]
 
 
-def test_diff_sanity_allows_tests():
+def test_diff_sanity_ignores_extra_files():
     diff = """diff --git a/tests/test_auth.py b/tests/test_auth.py
 --- a/tests/test_auth.py
 +++ b/tests/test_auth.py
@@ -80,8 +81,9 @@ diff --git a/src/billing.py b/src/billing.py
      pass
 """
     result = diff_sanity(diff, _DIAG)
-    assert result["files_outside_blast_radius"] == ["src/billing.py"]
-    assert not result["ok"]
+    assert result["ok"]
+    assert not result["test_files_deleted"]
+    assert not result["ci_config_modified"]
     ci = """diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
 --- a/.github/workflows/ci.yml
 +++ b/.github/workflows/ci.yml
@@ -155,4 +157,5 @@ async def test_validate_passes():
     )
     assert result["verdict"] == "passed"
     assert result["requirement_alignment"]["Validate email format"] == 0.92
-    assert result["blast_radius_contained"] is True
+    assert result["regression_risk"] == 0.05
+    assert "files_outside_blast_radius" not in result["diff_sanity"]

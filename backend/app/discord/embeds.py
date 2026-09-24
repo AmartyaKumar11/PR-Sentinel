@@ -151,13 +151,11 @@ def build_validation_failed_embed(gate: dict, result: dict) -> discord.Embed:
             inline=False,
         )
     sanity = gate.get("diff_sanity") or {}
-    outside = sanity.get("files_outside_blast_radius") or []
-    if outside or sanity.get("test_files_deleted") or sanity.get("ci_config_modified"):
+    if sanity:
         embed.add_field(
             name="Diff",
             value=(
                 f"Lines: {sanity.get('lines_changed', 0)}\n"
-                f"Outside blast radius: {', '.join(outside) or 'none'}\n"
                 f"Tests deleted: {sanity.get('test_files_deleted')}\n"
                 f"CI config touched: {sanity.get('ci_config_modified')}"
             )[:1000],

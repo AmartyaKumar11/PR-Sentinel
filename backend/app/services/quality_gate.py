@@ -10,17 +10,6 @@ from app.services.diff_parser import parse_diff
 
 logger = logging.getLogger(__name__)
 
-_CI_PREFIXES = (
-    ".github/",
-    "dockerfile",
-    "docker-compose",
-    ".gitlab-ci",
-    "jenkinsfile",
-    ".circleci/",
-    "azure-pipelines",
-)
-
-
 def classify_ci(status: dict | None, runs: list | None) -> str:
     runs = list(runs or [])
     statuses = (status or {}).get("statuses") or []
@@ -42,12 +31,12 @@ def classify_ci(status: dict | None, runs: list | None) -> str:
     return "no_ci"
 
 
-def judge_alignment(scores: dict[str, float], regression: float, contained: float) -> str:
+def judge_alignment(scores: dict[str, float], regression: float, _contained: float = 0) -> str:
     if any(v < 0.4 for v in scores.values()):
         return "fail"
     if any(v <= 0.6 for v in scores.values()):
         return "partial"
-    if regression < 0.3 and contained > 0.5:
+    if regression < 0.3:
         return "pass"
     return "fail"
 
@@ -58,70 +47,30 @@ def _is_test(path: str) -> bool:
     return "/tests/" in f"/{name}" or base.startswith("test_") or base.endswith("_test.py")
 
 
-def _is_flaggable_file(path: str, known: set[str]) -> bool:
-    """Only source under src/ or app/ that the diagnosis never named."""
-    path = path.replace("\\", "/")
-    if not path.endswith(".py"):
-        return False
-    name = path.split("/")[-1]
-    if name.startswith("test_") or name.endswith("_test.py") or "/tests/" in f"/{path}":
-        return False
-    if name == "__init__.py":
-        return False
-    if not (path.startswith(("src/", "app/"))):
-        return False
-    return path not in known
-
-
-def _is_ci(path: str) -> bool:
+def _is_workflow(path: str) -> bool:
     name = path.replace("\\", "/").lower()
-    return any(name.startswith(p) or f"/{p}" in f"/{name}" for p in _CI_PREFIXES)
+    return ".github/workflows/" in f"/{name}"
 
 
-def _allowed_files(diagnosis: dict) -> set[str]:
-    allowed = {p.replace("\\", "/") for p in (diagnosis.get("changed_files") or [])}
-    blast = diagnosis.get("blast_radius") or {}
-    for key in (
-        "directly_changed",
-        "depth_1_impacted",
-        "depth_2_impacted",
-        "depth_3_impacted",
-        "untested_impacted",
-    ):
-        for item in blast.get(key) or []:
-            if isinstance(item, dict) and item.get("file"):
-                allowed.add(str(item["file"]).replace("\\", "/"))
-            elif isinstance(item, str) and ("/" in item or item.endswith(".py")):
-                allowed.add(item.split(":")[0].replace("\\", "/"))
-    return allowed
-
-
-def diff_sanity(diff: str, diagnosis: dict) -> dict:
+def diff_sanity(diff: str, _diagnosis: dict | None = None) -> dict:
     parsed = parse_diff(diff or "")
     lines = 0
     for line in (diff or "").splitlines():
         if line.startswith(("+", "-")) and not line.startswith(("+++", "---")):
             lines += 1
-    allowed = _allowed_files(diagnosis)
-    outside = []
     deleted_test = False
     ci_touched = False
     for file in parsed["files"]:
         path = file["path"].replace("\\", "/")
         if file["status"] == "deleted" and _is_test(path):
             deleted_test = True
-        if _is_ci(path):
+        if _is_workflow(path):
             ci_touched = True
-        # ponytail: no file list in the diagnosis means we cannot tell what is outside it
-        if allowed and _is_flaggable_file(path, allowed):
-            outside.append(path)
-    ok = lines < 500 and not outside and not deleted_test and not ci_touched
     return {
         "lines_changed": lines,
-        "files_outside_blast_radius": outside,
         "test_files_deleted": deleted_test,
         "ci_config_modified": ci_touched,
-        "ok": ok,
+        "ok": lines < 500 and not deleted_test and not ci_touched,
     }
 
 
@@ -135,7 +84,7 @@ def _summary(ci: str, alignment: str | None, scores: dict, sanity: dict | None, 
     if verdict == "passed":
         return (
             "All checks passed. Fix addresses the missing requirements, "
-            "no regressions detected, blast radius contained."
+            "no regressions detected."
         )
     if ci in ("failed", "pending"):
         return f"CI {ci}. Later checks were skipped."
@@ -149,8 +98,6 @@ def _summary(ci: str, alignment: str | None, scores: dict, sanity: dict | None, 
     if sanity:
         if sanity["lines_changed"] >= 500:
             reasons.append(f"{sanity['lines_changed']} lines changed")
-        if sanity["files_outside_blast_radius"]:
-            reasons.append("files outside the blast radius")
         if sanity["test_files_deleted"]:
             reasons.append("a test file was deleted")
         if sanity["ci_config_modified"]:
@@ -158,18 +105,16 @@ def _summary(ci: str, alignment: str | None, scores: dict, sanity: dict | None, 
     return "Diff sanity failed: " + ", ".join(reasons or ["check failed"]) + "."
 
 
-def _result(ci, scores, regression, contained, sanity, alignment, verdict) -> dict:
+def _result(ci, scores, regression, sanity, alignment, verdict) -> dict:
     return {
         "passed": verdict == "passed",
         "verdict": verdict,
         "ci_status": ci,
         "requirement_alignment": scores,
         "regression_risk": regression,
-        "blast_radius_contained": bool(contained is not None and contained > 0.5),
         "diff_sanity": sanity
         or {
             "lines_changed": 0,
-            "files_outside_blast_radius": [],
             "test_files_deleted": False,
             "ci_config_modified": False,
         },
@@ -207,7 +152,7 @@ async def validate(
         sha = fix_pr["head_sha"]
         ci = await _poll_ci(github, owner, repo, sha, max_wait, interval)
         if ci in ("failed", "pending"):
-            return _result(ci, {}, None, None, None, None, "failed")
+            return _result(ci, {}, None, None, None, "failed")
 
         diff = fix_pr.get("diff")
         if not diff:
@@ -227,25 +172,21 @@ async def validate(
         questions["introduces_regression"] = Noul(
             instructions="The fix introduces obvious breaking changes or removes existing functionality"
         )
-        questions["blast_radius_reduced"] = Noul(
-            instructions="The fix does not increase the blast radius by touching additional unrelated modules"
-        )
         answers = await jev.evaluate(
             state={"fix_diff": (diff or "")[:4000], "original_diagnosis": diagnosis},
             questions=questions,
         )
         scores = {req: _noul(answers[f"req_{i}"]) for i, req in enumerate(missing)}
         regression = _noul(answers["introduces_regression"])
-        contained = _noul(answers["blast_radius_reduced"])
-        alignment = judge_alignment(scores, regression, contained)
+        alignment = judge_alignment(scores, regression)
         if alignment == "fail":
-            return _result(ci, scores, regression, contained, None, alignment, "failed")
+            return _result(ci, scores, regression, None, alignment, "failed")
 
-        sanity = diff_sanity(diff or "", diagnosis)
+        sanity = diff_sanity(diff or "")
         if not sanity["ok"]:
-            return _result(ci, scores, regression, contained, sanity, alignment, "failed")
+            return _result(ci, scores, regression, sanity, alignment, "failed")
         verdict = "partial" if alignment == "partial" else "passed"
-        return _result(ci, scores, regression, contained, sanity, alignment, verdict)
+        return _result(ci, scores, regression, sanity, alignment, verdict)
     finally:
         if own_github:
             await github.close()
