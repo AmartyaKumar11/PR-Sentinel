@@ -5,6 +5,8 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import os
+import sys
 from pathlib import Path
 
 import httpx
@@ -12,8 +14,6 @@ import pytest
 from httpx import ASGITransport, AsyncClient, MockTransport, Response
 
 # Ensure app imports resolve
-import sys
-
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.config import settings
@@ -260,8 +260,8 @@ async def test_github_client_four_methods_mocked():
 @pytest.mark.asyncio
 async def test_live_fetch_file_from_public_repo():
     """M-03 smoke against the real public PR-Sentinel repo (no write)."""
-    if not settings.GITHUB_TOKEN:
-        pytest.skip("no GITHUB_TOKEN")
+    if os.environ.get("CI") or not settings.GITHUB_TOKEN:
+        pytest.skip("skip live GitHub fetch in CI")
     gh = GitHubClient(token="", owner="AmartyaKumar11", repo="PR-Sentinel")
     try:
         text = await gh.fetch_file_content("README.md", "main")
