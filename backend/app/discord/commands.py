@@ -6,6 +6,7 @@ import discord
 from discord import app_commands
 
 from app.config import settings
+from app.discord.views import owner_only
 from app.database import get_db
 from app.services.cursor_client import cursor
 from app.services.github_client import GitHubClient
@@ -26,6 +27,8 @@ async def _active_agent(db):
 async def setup_commands(bot):
     @bot.tree.command(name="status", description="Check the current Cursor agent status")
     async def status(interaction: discord.Interaction):
+        if not await owner_only(interaction):
+            return
         db = await get_db()
         task = await _active_agent(db)
         if not task:
@@ -42,6 +45,8 @@ async def setup_commands(bot):
 
     @bot.tree.command(name="stop", description="Cancel the running Cursor agent")
     async def stop(interaction: discord.Interaction):
+        if not await owner_only(interaction):
+            return
         db = await get_db()
         task = await _active_agent(db)
         if not task:
@@ -53,6 +58,8 @@ async def setup_commands(bot):
     @bot.tree.command(name="resume", description="Resume or re-send instructions to the agent")
     @app_commands.describe(message="Optional follow-up instructions")
     async def resume(interaction: discord.Interaction, message: str = None):
+        if not await owner_only(interaction):
+            return
         db = await get_db()
         row = await db.execute(
             "SELECT cursor_agent_id FROM tasks WHERE cursor_agent_id IS NOT NULL "
@@ -68,17 +75,23 @@ async def setup_commands(bot):
     @bot.tree.command(name="model", description="Change the model for the next agent run")
     @app_commands.describe(name="Model id, for example composer-2.5")
     async def model(interaction: discord.Interaction, name: str):
+        if not await owner_only(interaction):
+            return
         cursor.default_model = name
         await interaction.response.send_message(f"Model set to `{name}` for next run.")
 
     @bot.tree.command(name="models", description="List available Cursor models")
     async def models(interaction: discord.Interaction):
+        if not await owner_only(interaction):
+            return
         available = await cursor.list_models()
         model_list = "\n".join(f"  • `{m}`" for m in available) or "  none"
         await interaction.response.send_message(f"**Available models:**\n{model_list}")
 
     @bot.tree.command(name="diff", description="Show the current fix diff")
     async def diff(interaction: discord.Interaction):
+        if not await owner_only(interaction):
+            return
         db = await get_db()
         row = await db.execute(
             "SELECT cursor_agent_id FROM tasks WHERE cursor_agent_id IS NOT NULL "
@@ -104,6 +117,8 @@ async def setup_commands(bot):
 
     @bot.tree.command(name="merge", description="Merge the fix PR")
     async def merge(interaction: discord.Interaction):
+        if not await owner_only(interaction):
+            return
         await interaction.response.defer(thinking=True)
         db = await get_db()
         row = await db.execute(
@@ -127,6 +142,8 @@ async def setup_commands(bot):
 
     @bot.tree.command(name="reject", description="Close the fix PR and dismiss the task")
     async def reject(interaction: discord.Interaction):
+        if not await owner_only(interaction):
+            return
         db = await get_db()
         row = await db.execute(
             "SELECT id, cursor_agent_id FROM tasks WHERE cursor_agent_id IS NOT NULL "
@@ -148,6 +165,8 @@ async def setup_commands(bot):
 
     @bot.tree.command(name="logs", description="Show the agent reasoning trace")
     async def logs(interaction: discord.Interaction):
+        if not await owner_only(interaction):
+            return
         db = await get_db()
         row = await db.execute("SELECT id FROM tasks ORDER BY created_at DESC LIMIT 1")
         task = await row.fetchone()
@@ -168,6 +187,8 @@ async def setup_commands(bot):
 
     @bot.tree.command(name="config", description="Show current PR Sentinel configuration")
     async def config(interaction: discord.Interaction):
+        if not await owner_only(interaction):
+            return
         await interaction.response.send_message(
             f"**Model:** `{cursor.default_model}`\n"
             f"**Backend:** `{settings.DEEPSEEK_BASE_URL}`\n"

@@ -2,32 +2,43 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
+import uuid
 
-from app.agent.prompts import DISCORD_CHAT_PROMPT
+from app.agent.prompts import DISCORD_AGENT_PROMPT
 from app.config import settings
 from app.database import get_db
-from app.discord.views import parse_pr_url
 from app.services.cursor_client import cursor
 from app.services.github_client import GitHubClient
-from app.services.task_manager import update_task_status
+from app.services.task_manager import get_health_stats, update_task_status
 
 logger = logging.getLogger(__name__)
 
-# ponytail: ~4 chars/token. Upgrade when a real tokenizer is in the process.
+# ponytail: ~4 chars/token. Dynamic context only; the system prompt is separate.
 MAX_CONTEXT_CHARS = 8000
-DESTRUCTIVE = {"merge", "stop", "close", "reject"}
+_ACTIVE = "('resolved','error','dismissed')"
+_MODELS = (
+    "cursor-small, gpt-4o-mini, gpt-4o, claude-sonnet-4-20250514, "
+    "gemini-2.5-pro, claude-opus-4-20250514"
+)
+_FENCE = re.compile(r"```action\s*\n(.*?)\n?```", re.S)
 FAST_ACTIONS = {
-    "status": "status",
-    "approve": "launch",
-    "stop": "stop",
-    "merge": "merge",
-    "reject": "close",
+    "status": "get_status",
+    "approve": "launch_agent",
+    "stop": "stop_agent",
+    "merge": "merge_pr",
+    "reject": "close_pr",
 }
-_YES = {"yes", "y", "confirm", "do it", "ship it", "go ahead", "yes do it"}
+_FAST_CONFIRM = {"merge_pr", "close_pr"}
+_YES = {"yes", "y", "confirm", "do it", "ship it", "go ahead", "yes do it", "yes merge"}
 _NO = {"no", "n", "cancel", "nope", "never mind", "nevermind"}
+_TIMEOUT_REPLY = (
+    "Taking too long to think. Try a simpler phrasing "
+    "or use a slash command: /status, /merge, /stop"
+)
 
 
 def should_fast_path(noul: float, text: str) -> bool:
@@ -38,44 +49,80 @@ def allow_action(noul: float) -> bool:
     return noul >= 0.3
 
 
-def cap_context(text: str, limit: int = MAX_CONTEXT_CHARS) -> str:
-    return text if len(text) <= limit else text[:limit]
-
-
 def parse_action(text: str) -> tuple[str, dict | None]:
-    decoder = json.JSONDecoder()
-    found = None
-    span = None
-    idx = 0
-    while True:
-        i = text.find("{", idx)
-        if i < 0:
-            break
-        try:
-            obj, end = decoder.raw_decode(text[i:])
-        except json.JSONDecodeError:
-            idx = i + 1
+    match = _FENCE.search(text or "")
+    if not match:
+        return (text or "").strip(), None
+    prose = (text[: match.start()] + text[match.end() :]).strip()
+    try:
+        obj = json.loads(match.group(1).strip())
+    except json.JSONDecodeError:
+        logger.warning("discord action block was not valid JSON")
+        return prose, None
+    if not isinstance(obj, dict) or not isinstance(obj.get("action"), str):
+        logger.warning("discord action block missing action")
+        return prose, None
+    return prose, {"action": obj["action"], "params": obj.get("params") or {}}
+
+
+def format_active(tasks: list[dict], detailed: bool) -> str:
+    if not tasks:
+        return "none"
+    lines = []
+    for task in tasks:
+        if not detailed:
+            lines.append(f"PR #{task['pr_number']} — {task['severity']} — {task['status']}")
             continue
-        if isinstance(obj, dict) and isinstance(obj.get("action"), str):
-            found = obj
-            span = (i, i + end)
-        idx = i + 1
-    if not found or span is None:
-        return text.strip(), None
-    cleaned = (text[: span[0]] + text[span[1] :]).strip()
-    cleaned = re.sub(r"```(?:json)?\s*```", "", cleaned).strip()
-    return cleaned, {"action": found["action"], "params": found.get("params") or {}}
+        lines.append(
+            f"PR #{task['pr_number']} — {task['repo']} — {task['severity']} — {task['status']}\n"
+            f"Missing: {task.get('missing') or 'none'}\n"
+            f"Agent: {task.get('agent') or 'none'}"
+        )
+    return "\n".join(lines)
+
+
+def render_context(active, agent_block, recent, convo, *, detailed=True, include_recent=True) -> str:
+    parts = [
+        "CURRENT STATE:",
+        "",
+        "Active tasks:",
+        format_active(active, detailed),
+        "",
+        agent_block.strip(),
+        "",
+    ]
+    if include_recent:
+        parts += ["Recent history:", "\n".join(recent) if recent else "none", ""]
+    parts += ["Conversation so far:", "\n".join(convo) if convo else "none"]
+    return "\n".join(parts).strip()
+
+
+def fit_context(active, agent_block, recent, convo, limit: int = MAX_CONTEXT_CHARS) -> str:
+    text = render_context(active, agent_block, recent, convo)
+    if len(text) <= limit:
+        return text
+    text = render_context(active, agent_block, recent, convo, include_recent=False)
+    if len(text) <= limit:
+        return text
+    text = render_context(active, agent_block, recent, convo, detailed=False, include_recent=False)
+    return text if len(text) <= limit else text[:limit]
 
 
 def confirm_line(action: dict, task: dict | None) -> str:
     pr = (task or {}).get("pr_number", "?")
     name = action.get("action")
-    if name == "merge":
+    if name == "merge_pr":
         return f"Are you sure? This will merge PR #{pr} into main."
-    if name in {"close", "reject"}:
+    if name == "close_pr":
         return f"Are you sure? This will close PR #{pr} without merging."
-    if name == "stop":
+    if name == "stop_agent":
         return "Are you sure? This will stop the running Cursor agent."
+    if name == "dismiss_task":
+        return f"Are you sure? This will dismiss PR #{pr}."
+    if name == "resolve_task":
+        return f"Are you sure? This will mark PR #{pr} resolved."
+    if name == "relaunch_agent":
+        return "Are you sure? This will stop the running agent and start a new one."
     return "Are you sure?"
 
 
@@ -100,18 +147,17 @@ def _loads(raw) -> dict:
         return {}
 
 
-def _summarize(row: dict) -> str:
-    diag = _loads(row.get("diagnosis_json"))
-    intent = diag.get("intent_alignment") or {}
-    blast = diag.get("blast_radius") or {}
-    missing = ", ".join(intent.get("missing") or []) or "none"
-    fix = (row.get("suggested_fix") or "")[:180]
-    return (
-        f"PR #{row.get('pr_number')} {row.get('repo')} "
-        f"{row.get('severity')} status={row.get('status')}; "
-        f"missing: {missing}; risk {blast.get('risk_score', 0)}; "
-        f"path {blast.get('highest_risk_path') or 'n/a'}; fix: {fix}"
-    )
+def _split_repo(full: str) -> tuple[str, str]:
+    if "/" not in (full or ""):
+        raise ValueError(f"Repo must be owner/name, got {full!r}")
+    owner, repo = full.split("/", 1)
+    return owner, repo
+
+
+def _clip(text: str, limit: int = 1500) -> str:
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "\n(truncated)"
 
 
 async def handle_message(bot, message) -> None:
@@ -127,9 +173,9 @@ async def handle_message(bot, message) -> None:
     try:
         async with message.channel.typing():
             reply = await _reply(bot, message, text)
-    except Exception:
+    except Exception as exc:
         logger.exception("discord conversation failed")
-        reply = "I couldn't handle that. Try again in a sentence."
+        reply = f"Tried to answer that.\n\n⚠️ Action failed: {exc}"
     if reply:
         await message.reply(reply[:1900])
 
@@ -140,7 +186,7 @@ async def _reply(bot, message, text: str) -> str:
         if decision is True:
             action = bot._pending_action
             bot._pending_action = None
-            return await execute(action)
+            return await _run(action)
         if decision is False:
             bot._pending_action = None
             return "Cancelled. Nothing was merged, stopped, or closed."
@@ -148,34 +194,56 @@ async def _reply(bot, message, text: str) -> str:
 
     noul = await _action_noul(text)
     if should_fast_path(noul, text):
-        picked = await _fast_choice(text)
-        mapped = FAST_ACTIONS.get(picked)
+        mapped = FAST_ACTIONS.get(await _fast_choice(text))
         if mapped:
             action = {"action": mapped, "params": {}}
-            if mapped in DESTRUCTIVE:
+            if mapped in _FAST_CONFIRM:
                 bot._pending_action = action
-                task = await _latest_task()
-                return confirm_line(action, task)
-            return await execute(action)
+                return confirm_line(action, await _latest_task())
+            return await _run(action)
 
-    history = await _history(message)
-    system = await _system_prompt()
-    from app.services.llm_client import LLMClient
+    context = await build_dynamic_context(message)
+    try:
+        raw = await asyncio.wait_for(
+            _chat(context, text),
+            timeout=15,
+        )
+    except TimeoutError:
+        logger.warning("deepseek discord chat timed out")
+        return _TIMEOUT_REPLY
 
-    raw = await LLMClient().chat(system, history)
     prose, action = parse_action(raw)
     if action and not allow_action(noul):
+        logger.info("dropped discord action; jev noul %.2f", noul)
         action = None
     if not action:
         return prose or raw.strip()
-    if action["action"] in DESTRUCTIVE:
-        bot._pending_action = action
-        task = await _latest_task()
-        if not re.search(r"are you sure|confirm", prose, re.I):
-            prose = (prose + "\n" + confirm_line(action, task)).strip()
-        return prose
-    result = await execute(action)
-    return (prose + "\n" + result).strip() if prose else result
+    result = await _run(action, prose)
+    return result
+
+
+async def _chat(context: str, text: str) -> str:
+    from app.services.llm_client import LLMClient
+
+    return await LLMClient().chat(
+        DISCORD_AGENT_PROMPT,
+        [
+            {"role": "user", "content": context},
+            {"role": "user", "content": text},
+        ],
+    )
+
+
+async def _run(action: dict, prose: str = "") -> str:
+    try:
+        result = await execute(action)
+    except Exception as exc:
+        logger.exception("discord action %s failed", action.get("action"))
+        fail = f"⚠️ Action failed: {exc}"
+        return f"{prose}\n\n{fail}".strip() if prose else fail
+    if not prose:
+        return result
+    return f"{prose}\n{result}".strip()
 
 
 async def _action_noul(text: str) -> float:
@@ -260,92 +328,205 @@ async def _confirm_decision(text: str) -> bool | None:
     return None
 
 
-async def _history(message) -> list[dict]:
-    rows = []
-    async for msg in message.channel.history(limit=10):
-        content = (msg.content or "").strip()
-        if not content:
-            continue
-        role = "assistant" if msg.author.bot else "user"
-        rows.append({"role": role, "content": content[:500]})
-    rows.reverse()
-    blob = rows
-    while blob and sum(len(m["content"]) for m in blob) > 4000:
-        blob.pop(0)
-    return blob[-10:]
-
-
-async def _system_prompt() -> str:
+async def build_dynamic_context(message) -> str:
     db = await get_db()
     cur = await db.execute(
-        "SELECT id, repo, pr_number, severity, status, suggested_fix, "
-        "diagnosis_json, cursor_agent_id FROM tasks ORDER BY created_at DESC LIMIT 3"
+        "SELECT id, repo, pr_number, severity, status, diagnosis_json, cursor_agent_id "
+        f"FROM tasks WHERE status NOT IN {_ACTIVE} ORDER BY created_at DESC LIMIT 5"
     )
-    tasks = [dict(r) for r in await cur.fetchall()]
-    task_state = "\n".join(_summarize(t) for t in tasks) or "No tasks yet."
-    cursor_state = "idle"
-    latest = tasks[0] if tasks else None
-    agent_id = (latest or {}).get("cursor_agent_id")
-    if agent_id:
+    active = []
+    for row in await cur.fetchall():
+        row = dict(row)
+        missing = (_loads(row.get("diagnosis_json")).get("intent_alignment") or {}).get("missing") or []
+        active.append(
+            {
+                "pr_number": row["pr_number"],
+                "repo": row["repo"],
+                "severity": row["severity"],
+                "status": row["status"],
+                "missing": ", ".join(missing) if missing else "none",
+                "agent": row.get("cursor_agent_id") or "none",
+                "cursor_agent_id": row.get("cursor_agent_id"),
+            }
+        )
+    hist = await db.execute(
+        "SELECT pr_number, severity, resolved_at FROM tasks WHERE status = 'resolved' "
+        "ORDER BY resolved_at DESC LIMIT 3"
+    )
+    recent = [
+        f"PR #{row['pr_number']} — {row['severity']} — resolved {row['resolved_at']}"
+        for row in await hist.fetchall()
+    ]
+    agent_task = next((t for t in active if t.get("cursor_agent_id")), None)
+    if agent_task:
+        agent_id = agent_task["cursor_agent_id"]
         try:
             status = await cursor.get_run_status(agent_id)
-            cursor_state = (
-                f"status={status.get('status')} branch={status.get('branch') or 'n/a'} "
-                f"pr={status.get('pr_url') or 'none'} model={cursor.default_model}"
+            agent_block = (
+                "Cursor agent:\n"
+                f"Agent ID: {agent_id}\n"
+                f"Status: {status.get('status')}\n"
+                f"Model: {cursor.default_model}\n"
+                f"Branch: {status.get('branch') or 'n/a'}\n"
+                f"PR URL: {status.get('pr_url') or 'none'}"
             )
-        except Exception:
+        except Exception as exc:
             logger.warning("cursor status for chat context failed", exc_info=True)
-            cursor_state = f"agent {agent_id} (status unavailable) model={cursor.default_model}"
+            agent_block = (
+                "Cursor agent:\n"
+                f"Agent ID: {agent_id}\n"
+                f"Status: unavailable ({exc})\n"
+                f"Model: {cursor.default_model}\n"
+                "Branch: n/a\n"
+                "PR URL: none"
+            )
     else:
-        cursor_state = f"idle model={cursor.default_model}"
-    prompt = DISCORD_CHAT_PROMPT.replace("{task_state}", task_state).replace(
-        "{cursor_state}", cursor_state
-    )
-    return cap_context(prompt)
+        agent_block = (
+            "No active agent:\n"
+            f"Default model: {cursor.default_model}\n"
+            f"Available models: {_MODELS}"
+        )
+    convo = []
+    async for msg in message.channel.history(limit=10):
+        content = (msg.content or "").strip()
+        if content:
+            who = "bot" if msg.author.bot else "user"
+            convo.append(f"{who}: {content[:400]}")
+    convo.reverse()
+    return fit_context(active, agent_block, recent, convo)
 
 
 async def _latest_task() -> dict | None:
     db = await get_db()
     cur = await db.execute(
-        "SELECT * FROM tasks WHERE status NOT IN ('resolved','error','dismissed') "
-        "ORDER BY created_at DESC LIMIT 1"
+        f"SELECT * FROM tasks WHERE status NOT IN {_ACTIVE} ORDER BY created_at DESC LIMIT 1"
     )
     row = await cur.fetchone()
     return dict(row) if row else None
 
 
+async def _pick_task(params: dict) -> dict | None:
+    db = await get_db()
+    if params.get("task_id"):
+        cur = await db.execute("SELECT * FROM tasks WHERE id = ?", (params["task_id"],))
+    elif params.get("pr_number"):
+        cur = await db.execute(
+            "SELECT * FROM tasks WHERE pr_number = ? ORDER BY created_at DESC LIMIT 1",
+            (int(params["pr_number"]),),
+        )
+    else:
+        return await _latest_task()
+    row = await cur.fetchone()
+    return dict(row) if row else None
+
+
+def _target(params: dict, task: dict | None) -> tuple[str, str, int]:
+    if params.get("owner") and params.get("repo") and params.get("pr_number"):
+        return params["owner"], params["repo"], int(params["pr_number"])
+    if not task:
+        raise ValueError("No pull request to act on.")
+    owner, repo = _split_repo(task["repo"])
+    return owner, repo, int(params.get("pr_number") or task["pr_number"])
+
+
 async def execute(action: dict) -> str:
     name = action.get("action") or ""
     params = action.get("params") or {}
-    task = await _latest_task()
-    if name == "defer":
-        return "Holding off. The task stays where it is."
-    if name == "status":
+    task = await _pick_task(params)
+    if name == "get_status":
         return await _status_text(task)
-    if name == "model":
-        model = params.get("name") or params.get("model")
+    if name == "set_model":
+        model = params.get("model")
         if not model:
             return "Which model should I use?"
         cursor.default_model = model
         return f"Next run will use `{model}`."
-    if name in {"launch", "approve"}:
+    if name == "list_models":
+        models = await cursor.list_models()
+        return ", ".join(f"`{m}`" for m in models) or "No models returned."
+    if name == "launch_agent":
         return await _launch(task, params)
-    if name == "resume":
-        return await _resume(task, params.get("message") or params.get("prompt") or "")
-    if name == "stop":
+    if name == "relaunch_agent":
+        if task and task.get("cursor_agent_id"):
+            await cursor.cancel_agent(task["cursor_agent_id"])
+        return await _launch(task, params)
+    if name == "resume_agent":
+        return await _resume(task, params.get("message") or "")
+    if name == "stop_agent":
         if not task or not task.get("cursor_agent_id"):
             return "No running agent to stop."
         await cursor.cancel_agent(task["cursor_agent_id"])
         return "Agent stopped."
-    if name == "merge":
-        return await _merge(task, params.get("pr_url"))
-    if name in {"close", "reject"}:
-        return await _close(task, params.get("pr_url"))
-    if name == "diff":
-        return await _diff(task, params.get("pr_url"))
-    if name == "logs":
-        return await _logs(task)
-    return f"I don't have a way to run `{name}` yet."
+    if name == "merge_pr":
+        owner, repo, number = _target(params, task)
+        result = await GitHubClient().merge_pr(owner, repo, number, params.get("method") or "squash")
+        if result.get("merged"):
+            return f"Merged PR #{number}."
+        return f"Merge failed: {result.get('message')}"
+    if name == "close_pr":
+        owner, repo, number = _target(params, task)
+        result = await GitHubClient().close_pr(owner, repo, number)
+        if not result.get("closed", True):
+            return f"Close failed: {result.get('message')}"
+        return f"Closed PR #{number}."
+    if name == "post_comment":
+        owner, repo, number = _target(params, task)
+        body = params.get("body") or ""
+        if not body:
+            return "What should the comment say?"
+        posted = await GitHubClient().post_comment(owner, repo, number, body)
+        return f"Comment posted: {posted.get('html_url')}"
+    if name == "dismiss_task":
+        return await _set_status(task, "dismissed", "Task dismissed.")
+    if name == "resolve_task":
+        return await _set_status(task, "resolved", "Marked resolved.")
+    if name == "reopen_task":
+        return await _set_status(task, "dispatched", "Reopened.")
+    if name == "rediagnose":
+        return await _rediagnose(task, params)
+    if name == "get_diff":
+        owner, repo, number = _target(params, task)
+        diff = await GitHubClient().get_pr_diff(owner, repo, number)
+        return f"```diff\n{_clip(diff)}\n```"
+    if name == "get_trace":
+        return await _trace(task)
+    if name == "get_tasks":
+        return await _tasks(params)
+    if name == "get_prompt":
+        if not task:
+            return "No task to show a prompt for."
+        return f"```\n{_clip(task.get('composer_prompt') or 'No Composer prompt stored.')}\n```"
+    if name == "get_health":
+        stats = await get_health_stats(await get_db())
+        return (
+            f"Backend ok. Reviews {stats['reviews_completed']}. "
+            f"Last event {stats['last_webhook_at']}. Model `{settings.LLM_MODEL}`."
+        )
+    if name == "update_prompt":
+        return await _write_prompt(task, params.get("new_prompt") or "", replace=True)
+    if name == "append_to_prompt":
+        return await _write_prompt(task, params.get("addition") or "", replace=False)
+    return f"No handler for `{name}`."
+
+
+async def _set_status(task: dict | None, status: str, ok: str) -> str:
+    if not task:
+        return "No task for that."
+    await update_task_status(await get_db(), task["id"], status)
+    return ok
+
+
+async def _write_prompt(task: dict | None, text: str, *, replace: bool) -> str:
+    if not task:
+        return "No task to edit."
+    if not text:
+        return "What should I add to the prompt?"
+    current = task.get("composer_prompt") or ""
+    new = text if replace else (current.rstrip() + "\n" + text).strip()
+    db = await get_db()
+    await db.execute("UPDATE tasks SET composer_prompt = ? WHERE id = ?", (new, task["id"]))
+    await db.commit()
+    return "Prompt replaced." if replace else "Prompt updated."
 
 
 async def _status_text(task: dict | None) -> str:
@@ -360,8 +541,10 @@ async def _status_text(task: dict | None) -> str:
                 f" Branch {status.get('branch') or 'n/a'}."
                 f" PR {status.get('pr_url') or 'not yet'}."
             )
-        except Exception:
-            line += " Agent status unavailable."
+            if status.get("token_usage"):
+                line += f" Tokens {status['token_usage']}."
+        except Exception as exc:
+            line += f" Agent status unavailable ({exc})."
     return line
 
 
@@ -395,60 +578,53 @@ async def _resume(task: dict | None, message: str) -> str:
     return f"Sent that to the agent. Status: {result.get('status')}."
 
 
-async def _pr_target(task: dict | None, pr_url: str | None):
-    parsed = parse_pr_url(pr_url or "")
-    if parsed:
-        return parsed
-    if not task or not task.get("cursor_agent_id"):
-        return None
-    status = await cursor.get_run_status(task["cursor_agent_id"])
-    return parse_pr_url(status.get("pr_url") or "")
-
-
-async def _merge(task: dict | None, pr_url: str | None) -> str:
-    target = await _pr_target(task, pr_url)
-    if not target:
-        return "No pull request to merge yet."
-    result = await GitHubClient().merge_pr(*target)
-    if result.get("merged"):
-        return f"Merged PR #{target[2]}."
-    return f"Merge failed: {result.get('message')}"
-
-
-async def _close(task: dict | None, pr_url: str | None) -> str:
-    target = await _pr_target(task, pr_url)
-    if target:
-        await GitHubClient().close_pr(*target)
-    if task:
-        try:
-            await update_task_status(await get_db(), task["id"], "dismissed")
-        except ValueError:
-            pass
-    if not target:
-        return "No fix PR to close. Task left as-is." if not task else "Task dismissed. No fix PR was open."
-    return f"Closed PR #{target[2]}."
-
-
-async def _diff(task: dict | None, pr_url: str | None) -> str:
-    target = await _pr_target(task, pr_url)
-    if not target:
-        return "No pull request diff yet."
-    diff = await GitHubClient().get_pr_diff(*target)
-    if len(diff) > 1700:
-        diff = diff[:1700] + "\n... (truncated)"
-    return f"```diff\n{diff}\n```"
-
-
-async def _logs(task: dict | None) -> str:
+async def _rediagnose(task: dict | None, params: dict) -> str:
     if not task:
-        return "No task to show logs for."
+        return "No task for that PR."
+    owner, repo = _split_repo(task["repo"])
+    from app.routes.webhook import _agent
+
+    asyncio.create_task(
+        _agent.run(str(uuid.uuid4()), owner, repo, int(task["pr_number"]), task["head_sha"])
+    )
+    return f"Re-running diagnosis on PR #{task['pr_number']}."
+
+
+async def _trace(task: dict | None) -> str:
+    if not task:
+        return "No task to show a trace for."
     db = await get_db()
     cur = await db.execute(
-        "SELECT phase, type, content FROM trace_steps WHERE task_id = ? ORDER BY id",
+        "SELECT phase, content FROM trace_steps WHERE task_id = ? ORDER BY id",
         (task["id"],),
     )
+    lines = [f"[{row['phase']}] {row['content'][:160]}" for row in await cur.fetchall()]
+    body = "\n".join(lines[:20]) or "No trace steps recorded."
+    return f"```\n{_clip(body)}\n```"
+
+
+async def _tasks(params: dict) -> str:
+    status = params.get("status") or "all"
+    limit = int(params.get("limit") or 5)
+    db = await get_db()
+    if status == "all":
+        cur = await db.execute(
+            "SELECT pr_number, repo, severity, status, diagnosis_json FROM tasks "
+            "ORDER BY created_at DESC LIMIT ?",
+            (limit,),
+        )
+    else:
+        cur = await db.execute(
+            "SELECT pr_number, repo, severity, status, diagnosis_json FROM tasks "
+            "WHERE status = ? ORDER BY created_at DESC LIMIT ?",
+            (status, limit),
+        )
     lines = []
-    for row in (await cur.fetchall())[:15]:
+    for row in await cur.fetchall():
         row = dict(row)
-        lines.append(f"[{row['phase']}] {row['content'][:100]}")
-    return "\n".join(lines) or "No trace steps recorded."
+        missing = (_loads(row.get("diagnosis_json")).get("intent_alignment") or {}).get("missing") or []
+        extra = f" — {len(missing)} missing reqs" if missing else ""
+        lines.append(
+            f"**PR #{row['pr_number']}** — {row['repo']} ({row['severity']}){extra} — {row['status']}"
+        )
+    return "\n".join(lines) or "No tasks."

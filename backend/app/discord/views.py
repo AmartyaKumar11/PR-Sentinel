@@ -8,6 +8,7 @@ import re
 
 import discord
 
+from app.config import settings
 from app.database import get_db
 from app.services.cursor_client import cursor
 from app.services.github_client import GitHubClient
@@ -16,6 +17,15 @@ from app.services.task_manager import get_task, update_task_status
 logger = logging.getLogger(__name__)
 
 _PR_URL = re.compile(r"github\.com/([^/]+)/([^/]+)/pull/(\d+)")
+
+
+async def owner_only(interaction: discord.Interaction) -> bool:
+    if interaction.user.id != int(settings.DISCORD_OWNER_ID):
+        await interaction.response.send_message(
+            "Only the repo owner can do this.", ephemeral=True
+        )
+        return False
+    return True
 
 
 def parse_pr_url(url: str) -> tuple[str, str, int] | None:
@@ -42,6 +52,8 @@ class ApprovalView(discord.ui.View):
 
     @discord.ui.button(label="Approve Fix", style=discord.ButtonStyle.green, emoji="✅")
     async def approve(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await owner_only(interaction):
+            return
         await interaction.response.defer(thinking=True)
         db = await get_db()
         task = await get_task(db, self.task_id)
@@ -73,6 +85,8 @@ class ApprovalView(discord.ui.View):
 
     @discord.ui.button(label="Reject", style=discord.ButtonStyle.red, emoji="❌")
     async def reject(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await owner_only(interaction):
+            return
         db = await get_db()
         await update_task_status(db, self.task_id, "dismissed")
         await interaction.response.send_message("Task dismissed.", ephemeral=True)
@@ -82,6 +96,8 @@ class ApprovalView(discord.ui.View):
 
     @discord.ui.button(label="View Details", style=discord.ButtonStyle.blurple, emoji="📋")
     async def details(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await owner_only(interaction):
+            return
         db = await get_db()
         task = await get_task(db, self.task_id)
         raw = task.get("diagnosis_json") or "{}"
@@ -125,6 +141,8 @@ class ReviewView(discord.ui.View):
 
     @discord.ui.button(label="Merge", style=discord.ButtonStyle.green, emoji="🔀")
     async def merge(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await owner_only(interaction):
+            return
         await interaction.response.defer(thinking=True)
         parsed = parse_pr_url(self.pr_url or "")
         if not parsed:
@@ -142,6 +160,8 @@ class ReviewView(discord.ui.View):
 
     @discord.ui.button(label="Reject Fix", style=discord.ButtonStyle.red, emoji="🚫")
     async def reject_fix(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await owner_only(interaction):
+            return
         parsed = parse_pr_url(self.pr_url or "")
         if parsed:
             await GitHubClient().close_pr(*parsed)
@@ -154,6 +174,8 @@ class ReviewView(discord.ui.View):
 
     @discord.ui.button(label="Re-run Agent", style=discord.ButtonStyle.blurple, emoji="🔄")
     async def rerun(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await owner_only(interaction):
+            return
         await interaction.response.defer(thinking=True)
         db = await get_db()
         task = await get_task(db, self.task_id)

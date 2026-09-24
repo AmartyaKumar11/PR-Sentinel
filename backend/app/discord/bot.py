@@ -53,6 +53,8 @@ class SentinelBot(commands.Bot):
         await self.channel.send(embed=build_verification_embed(verification))
 
     async def on_message(self, message: discord.Message):
+        if message.author.id != int(settings.DISCORD_OWNER_ID):
+            return
         await self.process_commands(message)
         from app.discord.conversation import handle_message
 

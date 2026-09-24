@@ -35,6 +35,7 @@ class Settings(BaseSettings):
     DISCORD_BOT_TOKEN: str = ""
     DISCORD_CHANNEL_ID: str = ""
     DISCORD_GUILD_ID: str = ""
+    DISCORD_OWNER_ID: str = ""
 
     CURSOR_API_KEY: str = ""
     CURSOR_DEFAULT_MODEL: str = "claude-sonnet-4-20250514"
