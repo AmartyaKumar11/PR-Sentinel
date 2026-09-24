@@ -250,6 +250,8 @@ async def test_github_client_four_methods_mocked():
 @pytest.mark.asyncio
 async def test_live_fetch_file_from_public_repo():
     """M-03 smoke against the real public PR-Sentinel repo (no write)."""
+    if not settings.GITHUB_TOKEN:
+        pytest.skip("no GITHUB_TOKEN")
     gh = GitHubClient(token="", owner="AmartyaKumar11", repo="PR-Sentinel")
     try:
         text = await gh.fetch_file_content("README.md", "main")
