@@ -19,7 +19,7 @@ def generate_composer_prompt(diagnosis: dict, triage: dict) -> str:
 
     files_section = "## Affected files (work in this order)\n"
     for f in triage.get("affected_files_priority") or []:
-        lines = ", ".join(str(l) for l in f.get("lines", []))
+        lines = ", ".join(str(n) for n in f.get("lines", []))
         files_section += f"- `{f['path']}` line {lines}: {f.get('change_type', '')}\n"
 
     blast_section = ""

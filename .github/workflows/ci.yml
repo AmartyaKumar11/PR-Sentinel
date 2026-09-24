@@ -1,0 +1,66 @@
+name: PR Sentinel CI
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  backend-test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt
+      - run: pip install pytest pytest-asyncio ruff
+      - run: ruff check app/
+      - run: pytest tests/ -v --tb=short
+
+  dashboard-build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: dashboard
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - run: npm ci
+      - run: npm run build
+
+  extension-compile:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: extension
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - run: npm ci
+      - run: npm run compile
+
+  self-review:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    needs: [backend-test]
+    steps:
+      - name: Trigger PR Sentinel self-review
+        env:
+          SENTINEL_URL: ${{ secrets.SENTINEL_WEBHOOK_URL }}
+          WEBHOOK_SECRET: ${{ secrets.GITHUB_WEBHOOK_SECRET }}
+        run: |
+          BODY='{"action":"opened","pull_request":{"number":${{ github.event.pull_request.number }},"head":{"sha":"${{ github.event.pull_request.head.sha }}"}},"repository":{"full_name":"${{ github.repository }}"}}'
+          SIGNATURE="sha256=$(echo -n "$BODY" | openssl dgst -sha256 -hmac "$WEBHOOK_SECRET" | awk '{print $2}')"
+          curl -s -X POST "$SENTINEL_URL" \
+            -H "Content-Type: application/json" \
+            -H "X-Hub-Signature-256: $SIGNATURE" \
+            -H "X-GitHub-Event: pull_request" \
+            -d "$BODY"

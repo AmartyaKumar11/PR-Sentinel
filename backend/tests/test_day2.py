@@ -160,6 +160,12 @@ def test_find_issue_from_body_and_branch():
 async def test_github_client_four_methods_mocked():
     def handler(request: httpx.Request) -> Response:
         path = request.url.path
+        accept = request.headers.get("accept", "")
+        if path.endswith("/pulls/7") and "diff" in accept:
+            return Response(
+                200,
+                text="diff --git a/src/auth.py b/src/auth.py\n+def reset_password(email):\n+    pass\n",
+            )
         if path.endswith("/pulls/7/files"):
             return Response(
                 200,

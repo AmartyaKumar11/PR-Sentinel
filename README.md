@@ -1,5 +1,8 @@
 # PR Sentinel
 
+![CI](https://github.com/AmartyaKumar11/pr-sentinel/actions/workflows/ci.yml/badge.svg)
+![Reviewed by PR Sentinel](https://img.shields.io/badge/reviewed%20by-PR%20Sentinel-blueviolet)
+
 AI-powered PR remediation: diagnose intent + blast radius, stream reasoning, dispatch a Cursor task, verify the fix.
 
 ## Specs

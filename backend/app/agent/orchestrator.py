@@ -8,7 +8,6 @@ import re
 
 from app.agent.composer_prompt import format_review_markdown, generate_composer_prompt
 from app.agent.parser import parse_agent_output
-from app.agent.prompts import DIAGNOSE_PROMPT
 from app.agent.tools.setup import build_tool_registry
 from app.database import get_db
 from app.services.diff_parser import extract_changed_identifiers, is_trivial_diff
@@ -40,7 +39,7 @@ def _reqs_from_issue(issue: dict | None) -> list[str]:
     if not issue:
         return []
     body = issue.get("body") or ""
-    bullets = re.findall(r"^[\-\*]\s+(.+)$", body, re.M)
+    bullets = re.findall(r"^[\-\*]\s+(.+)$", body, re.MULTILINE)
     if bullets:
         return [b.strip() for b in bullets if len(b.strip()) > 3][:12]
     # sentences as weak requirements
