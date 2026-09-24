@@ -78,6 +78,9 @@ Model management:
       "gemini" / "pro" → "gemini-2.5-pro"
       "opus" / "most capable" / "best" / "strongest" → "claude-opus-4-20250514"
       "4.1" / "gpt-4.1" → "gpt-4.1"
+      "auto" / "default" / "let cursor decide" → "auto"
+    When the model is "auto", omit the model param entirely.
+    If the user asks what model is in use and the default is auto, say "auto (Cursor picks)".
     If ambiguous, ask which one.
   {"action": "list_models", "params": {}}
     List available models. Use when the user asks what's available.

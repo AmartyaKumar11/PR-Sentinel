@@ -9,7 +9,12 @@ from fastapi.responses import JSONResponse
 from app.agent.orchestrator import AgentOrchestrator
 from app.config import settings
 from app.database import get_db
-from app.services.task_manager import get_existing_task
+from app.services.task_manager import (
+    get_existing_task,
+    get_pending_for_pr,
+    save_pending,
+    update_pending_sha,
+)
 from app.utils.hmac_verify import verify_hmac
 
 logger = logging.getLogger(__name__)
@@ -45,14 +50,54 @@ async def github_webhook(request: Request):
     existing = await get_existing_task(db, full, pr_number)
 
     if action == "synchronize" and existing:
-        task_id = existing["id"]
-        mode = "verify"
-    else:
-        task_id = str(uuid.uuid4())
-        mode = "full"
+        asyncio.create_task(
+            _agent.run(existing["id"], owner, repo, pr_number, head_sha, mode="verify")
+        )
+        return JSONResponse({"task_id": existing["id"]}, status_code=202)
 
-    asyncio.create_task(
-        _agent.run(task_id, owner, repo, pr_number, head_sha, mode=mode)
-    )
+    meta = _pr_meta(payload, full)
+    pending = await get_pending_for_pr(db, full, pr_number)
+    if pending:
+        await update_pending_sha(db, pending["id"], head_sha)
+        return JSONResponse({"pending_id": pending["id"]}, status_code=202)
 
-    return JSONResponse({"task_id": task_id}, status_code=202)
+    meta["id"] = str(uuid.uuid4())
+    await save_pending(db, meta)
+    asyncio.create_task(_notify_pr(meta))
+    return JSONResponse({"pending_id": meta["id"]}, status_code=202)
+
+
+def _pr_meta(payload: dict, full: str) -> dict:
+    pr = payload["pull_request"]
+    files = []
+    for item in pr.get("files") or []:
+        if isinstance(item, str):
+            files.append(item)
+        elif isinstance(item, dict) and item.get("filename"):
+            files.append(item["filename"])
+    if not files and pr.get("changed_files") is not None:
+        files = [f"{pr['changed_files']} files"]
+    user = pr.get("user") or {}
+    return {
+        "repo": full,
+        "pr_number": pr["number"],
+        "head_sha": pr["head"]["sha"],
+        "title": pr.get("title") or "",
+        "body": (pr.get("body") or "")[:300],
+        "author": user.get("login") or "unknown",
+        "files": files,
+        "head_ref": (pr.get("head") or {}).get("ref") or "",
+        "base_ref": (pr.get("base") or {}).get("ref") or "",
+    }
+
+
+async def _notify_pr(meta: dict) -> None:
+    try:
+        from app.discord.bot import bot
+
+        if not bot.is_ready():
+            logger.warning("discord not ready; raw PR notice skipped for #%s", meta["pr_number"])
+            return
+        await bot.send_pr_notice(meta)
+    except Exception:
+        logger.warning("discord raw PR notice failed", exc_info=True)

@@ -55,6 +55,20 @@ CREATE TABLE IF NOT EXISTS trace_steps (
     created_at      TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS pending_analysis (
+    id          TEXT PRIMARY KEY,
+    repo        TEXT NOT NULL,
+    pr_number   INTEGER NOT NULL,
+    head_sha    TEXT NOT NULL,
+    title       TEXT,
+    body        TEXT,
+    author      TEXT,
+    files_json  TEXT,
+    head_ref    TEXT,
+    base_ref    TEXT,
+    created_at  TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS cache (
     cache_key       TEXT PRIMARY KEY,
     value           TEXT NOT NULL,
@@ -68,6 +82,7 @@ CREATE INDEX IF NOT EXISTS idx_tasks_repo_pending ON tasks(repo, status)
     WHERE status IN ('pending', 'dispatched', 'accepted', 'in_progress');
 CREATE INDEX IF NOT EXISTS idx_trace_task ON trace_steps(task_id);
 CREATE INDEX IF NOT EXISTS idx_trace_task_phase ON trace_steps(task_id, phase);
+CREATE INDEX IF NOT EXISTS idx_pending_repo_pr ON pending_analysis(repo, pr_number);
 """
 
 

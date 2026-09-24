@@ -8,11 +8,18 @@ from app.discord.commands import setup_commands
 from app.discord.embeds import (
     build_agent_result_embed,
     build_needs_review_embed,
+    build_pr_notice_embed,
     build_task_embed,
     build_validation_failed_embed,
     build_verification_embed,
 )
-from app.discord.views import ApprovalView, FailedGateView, PartialGateView, ReviewView
+from app.discord.views import (
+    AnalyzeView,
+    ApprovalView,
+    FailedGateView,
+    PartialGateView,
+    ReviewView,
+)
 
 
 class SentinelBot(commands.Bot):
@@ -38,6 +45,13 @@ class SentinelBot(commands.Bot):
             self.channel = self.get_channel(int(settings.DISCORD_CHANNEL_ID))
         name = self.channel.name if self.channel else "no-channel"
         print(f"PR Sentinel bot online in #{name}")
+
+    async def send_pr_notice(self, meta: dict):
+        if self.channel is None:
+            return
+        embed = build_pr_notice_embed(meta)
+        view = AnalyzeView(meta["id"])
+        await self.channel.send(embed=embed, view=view)
 
     async def send_task_notification(self, task: dict):
         if self.channel is None:

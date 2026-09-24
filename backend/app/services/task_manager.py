@@ -246,6 +246,69 @@ async def save_trace_step(
     await db.commit()
 
 
+async def save_pending(db, row: dict) -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    await db.execute(
+        """
+        INSERT OR REPLACE INTO pending_analysis
+            (id, repo, pr_number, head_sha, title, body, author, files_json,
+             head_ref, base_ref, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            row["id"],
+            row["repo"],
+            row["pr_number"],
+            row["head_sha"],
+            row.get("title") or "",
+            row.get("body") or "",
+            row.get("author") or "",
+            json.dumps(row.get("files") or []),
+            row.get("head_ref") or "",
+            row.get("base_ref") or "",
+            row.get("created_at") or now,
+        ),
+    )
+    await db.commit()
+
+
+async def get_pending(db, pending_id: str) -> dict | None:
+    cur = await db.execute("SELECT * FROM pending_analysis WHERE id = ?", (pending_id,))
+    row = await cur.fetchone()
+    return _pending_row(row) if row else None
+
+
+async def get_pending_for_pr(db, repo: str, pr_number: int) -> dict | None:
+    cur = await db.execute(
+        "SELECT * FROM pending_analysis WHERE repo = ? AND pr_number = ? ORDER BY created_at DESC LIMIT 1",
+        (repo, pr_number),
+    )
+    row = await cur.fetchone()
+    return _pending_row(row) if row else None
+
+
+async def update_pending_sha(db, pending_id: str, head_sha: str) -> None:
+    await db.execute(
+        "UPDATE pending_analysis SET head_sha = ? WHERE id = ?",
+        (head_sha, pending_id),
+    )
+    await db.commit()
+
+
+async def delete_pending(db, pending_id: str) -> None:
+    await db.execute("DELETE FROM pending_analysis WHERE id = ?", (pending_id,))
+    await db.commit()
+
+
+def _pending_row(row) -> dict:
+    data = dict(row)
+    try:
+        data["files"] = json.loads(data.get("files_json") or "[]")
+    except json.JSONDecodeError:
+        data["files"] = []
+    return data
+
+
 async def cache_get(db, key: str) -> str | None:
     cursor = await db.execute(
         "SELECT value, expires_at FROM cache WHERE cache_key = ?", (key,)

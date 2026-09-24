@@ -11,7 +11,7 @@ import uuid
 from app.agent.prompts import DISCORD_AGENT_PROMPT
 from app.config import settings
 from app.database import get_db
-from app.services.cursor_client import cursor
+from app.services.cursor_client import cursor, model_label
 from app.services.github_client import GitHubClient
 from app.services.task_manager import get_health_stats, update_task_status
 
@@ -366,7 +366,7 @@ async def build_dynamic_context(message) -> str:
                 "Cursor agent:\n"
                 f"Agent ID: {agent_id}\n"
                 f"Status: {status.get('status')}\n"
-                f"Model: {cursor.default_model}\n"
+                f"Model: {model_label(cursor.default_model)}\n"
                 f"Branch: {status.get('branch') or 'n/a'}\n"
                 f"PR URL: {status.get('pr_url') or 'none'}"
             )
@@ -376,14 +376,14 @@ async def build_dynamic_context(message) -> str:
                 "Cursor agent:\n"
                 f"Agent ID: {agent_id}\n"
                 f"Status: unavailable ({exc})\n"
-                f"Model: {cursor.default_model}\n"
+                f"Model: {model_label(cursor.default_model)}\n"
                 "Branch: n/a\n"
                 "PR URL: none"
             )
     else:
         agent_block = (
             "No active agent:\n"
-            f"Default model: {cursor.default_model}\n"
+            f"Default model: {model_label(cursor.default_model)}\n"
             f"Available models: {_MODELS}"
         )
     convo = []
@@ -440,7 +440,7 @@ async def execute(action: dict) -> str:
         if not model:
             return "Which model should I use?"
         cursor.default_model = model
-        return f"Next run will use `{model}`."
+        return f"Next run will use `{model_label(model)}`."
     if name == "list_models":
         models = await cursor.list_models()
         return ", ".join(f"`{m}`" for m in models) or "No models returned."
@@ -568,7 +568,7 @@ async def _launch(task: dict | None, params: dict) -> str:
         await update_task_status(db, task["id"], "accepted")
     except ValueError:
         pass
-    return f"Launched `{result['agent_id']}` with {result['model']}."
+    return f"Launched `{result['agent_id']}` with {model_label(result['model'])}."
 
 
 async def _resume(task: dict | None, message: str) -> str:

@@ -38,7 +38,7 @@ class Settings(BaseSettings):
     DISCORD_OWNER_ID: str = ""
 
     CURSOR_API_KEY: str = ""
-    CURSOR_DEFAULT_MODEL: str = "claude-sonnet-4-20250514"
+    CURSOR_DEFAULT_MODEL: str = "auto"
 
     @property
     def cors_origins(self) -> list[str]:

@@ -71,6 +71,30 @@ def build_task_embed(task: dict) -> discord.Embed:
     return embed
 
 
+def build_pr_notice_embed(meta: dict) -> discord.Embed:
+    title = meta.get("title") or "Pull request"
+    body = (meta.get("body") or "").strip()
+    description = title if not body else f"{title}\n\n{body[:300]}"
+    embed = discord.Embed(
+        title=f"New PR #{meta.get('pr_number')} — {meta.get('repo')}",
+        description=description[:4000],
+        color=0x6366F1,
+    )
+    files = meta.get("files") or []
+    embed.add_field(
+        name="Files changed",
+        value="\n".join(f"• {name}" for name in files[:15]) or "none listed",
+        inline=False,
+    )
+    embed.add_field(name="Author", value=meta.get("author") or "unknown", inline=True)
+    embed.add_field(
+        name="Branch",
+        value=f"`{meta.get('head_ref') or '?'}` → `{meta.get('base_ref') or '?'}`",
+        inline=True,
+    )
+    return embed
+
+
 def build_agent_result_embed(result: dict) -> discord.Embed:
     status = result.get("status", "unknown")
     color = 0x22C55E if status == "completed" else 0xEF4444

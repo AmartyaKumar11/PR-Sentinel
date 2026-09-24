@@ -58,7 +58,7 @@ async def test_webhook_valid_returns_202():
             },
         )
     assert r.status_code == 202
-    assert "task_id" in r.json()
+    assert "pending_id" in r.json()
 
 
 @pytest.mark.asyncio
@@ -112,13 +112,13 @@ async def test_webhook_synchronize_reuses_task_id():
                 "X-Hub-Signature-256": _sign(body1),
             },
         )
-        # Without a DB row, synchronize still mints new id — insert via create_task
+        assert r1.status_code == 202
+        assert "pending_id" in r1.json()
         from app.database import get_db
         from app.services.task_manager import create_task
 
-        task_id = r1.json()["task_id"]
+        task_id = "sync-reuse-task"
         db = await get_db()
-        # May already exist from stub path — only insert if missing
         cur = await db.execute("SELECT id FROM tasks WHERE id = ?", (task_id,))
         if not await cur.fetchone():
             await create_task(
@@ -147,6 +147,16 @@ async def test_webhook_synchronize_reuses_task_id():
         )
     assert r2.status_code == 202
     assert r2.json()["task_id"] == task_id
+
+
+def test_auto_model_omits_create_arg():
+    from app.services.cursor_client import agent_create_kwargs, model_label
+
+    cloud = object()
+    assert "model" not in agent_create_kwargs("auto", "k", cloud)
+    assert agent_create_kwargs("gpt-4o-mini", "k", cloud)["model"] == "gpt-4o-mini"
+    assert model_label("auto") == "auto (Cursor picks)"
+    assert model_label("gpt-4o-mini") == "gpt-4o-mini"
 
 
 def test_find_issue_from_body_and_branch():

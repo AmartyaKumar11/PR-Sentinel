@@ -8,7 +8,7 @@ from discord import app_commands
 from app.config import settings
 from app.discord.views import owner_only
 from app.database import get_db
-from app.services.cursor_client import cursor
+from app.services.cursor_client import cursor, model_label
 from app.services.github_client import GitHubClient
 
 _PR_URL = re.compile(r"github\.com/([^/]+)/([^/]+)/pull/(\d+)")
@@ -78,7 +78,7 @@ async def setup_commands(bot):
         if not await owner_only(interaction):
             return
         cursor.default_model = name
-        await interaction.response.send_message(f"Model set to `{name}` for next run.")
+        await interaction.response.send_message(f"Model set to `{model_label(name)}` for next run.")
 
     @bot.tree.command(name="models", description="List available Cursor models")
     async def models(interaction: discord.Interaction):
@@ -120,25 +120,28 @@ async def setup_commands(bot):
         if not await owner_only(interaction):
             return
         await interaction.response.defer(thinking=True)
-        db = await get_db()
-        row = await db.execute(
-            "SELECT cursor_agent_id FROM tasks WHERE cursor_agent_id IS NOT NULL "
-            "ORDER BY created_at DESC LIMIT 1"
-        )
-        task = await row.fetchone()
-        if not task:
-            await interaction.followup.send("No task with a PR to merge.")
-            return
-        result = await cursor.get_run_status(dict(task)["cursor_agent_id"])
-        match = _PR_URL.search(result.get("pr_url") or "")
-        if not match:
-            await interaction.followup.send("No PR to merge yet.")
-            return
-        merge_result = await GitHubClient().merge_pr(match.group(1), match.group(2), int(match.group(3)))
-        if merge_result.get("merged"):
-            await interaction.followup.send("✅ Merged! The VERIFY phase will run automatically.")
-        else:
-            await interaction.followup.send(f"❌ Merge failed: {merge_result.get('message')}")
+        try:
+            db = await get_db()
+            row = await db.execute(
+                "SELECT cursor_agent_id FROM tasks WHERE cursor_agent_id IS NOT NULL "
+                "ORDER BY created_at DESC LIMIT 1"
+            )
+            task = await row.fetchone()
+            if not task:
+                await interaction.followup.send("No task with a PR to merge.")
+                return
+            result = await cursor.get_run_status(dict(task)["cursor_agent_id"])
+            match = _PR_URL.search(result.get("pr_url") or "")
+            if not match:
+                await interaction.followup.send("No PR to merge yet.")
+                return
+            merge_result = await GitHubClient().merge_pr(match.group(1), match.group(2), int(match.group(3)))
+            if merge_result.get("merged"):
+                await interaction.followup.send("✅ Merged! The VERIFY phase will run automatically.")
+            else:
+                await interaction.followup.send(f"❌ Merge failed: {merge_result.get('message')}")
+        except Exception as exc:
+            await interaction.followup.send(f"⚠️ Failed: {exc}", ephemeral=True)
 
     @bot.tree.command(name="reject", description="Close the fix PR and dismiss the task")
     async def reject(interaction: discord.Interaction):
@@ -190,7 +193,7 @@ async def setup_commands(bot):
         if not await owner_only(interaction):
             return
         await interaction.response.send_message(
-            f"**Model:** `{cursor.default_model}`\n"
+            f"**Model:** `{model_label(cursor.default_model)}`\n"
             f"**Backend:** `{settings.DEEPSEEK_BASE_URL}`\n"
             f"**LLM:** {settings.LLM_MODEL}\n"
             f"**Decision engine:** Jev {settings.JEV_MODEL}\n"

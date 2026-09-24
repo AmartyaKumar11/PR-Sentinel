@@ -24,6 +24,20 @@ def public_status(status: str) -> str:
     return _STATUS.get(status, status)
 
 
+def model_label(model: str | None) -> str:
+    if not model or model == "auto":
+        return "auto (Cursor picks)"
+    return model
+
+
+def agent_create_kwargs(model: str | None, api_key: str, cloud) -> dict:
+    """Omit model when it is auto so Agent.create does not get a guessed id."""
+    kwargs = {"api_key": api_key, "cloud": cloud}
+    if model and model != "auto":
+        kwargs["model"] = model
+    return kwargs
+
+
 def _repo_url(full_name: str) -> str:
     if full_name.startswith("http"):
         return full_name
@@ -72,18 +86,16 @@ class CursorClient:
         model = model or self.default_model
         if not self.api_key:
             raise RuntimeError("CURSOR_API_KEY is not set")
+        cloud = CloudAgentOptions(
+            repos=[CloudRepository(url=_repo_url(repo_full_name))],
+            auto_create_pr=True,
+            skip_reviewer_request=True,
+        )
+        kwargs = agent_create_kwargs(model, self.api_key, cloud)
 
         def _launch() -> dict:
             # ponytail: do not agent.close() — CloseAgent drops the cloud run.
-            agent = Agent.create(
-                model=model,
-                api_key=self.api_key,
-                cloud=CloudAgentOptions(
-                    repos=[CloudRepository(url=_repo_url(repo_full_name))],
-                    auto_create_pr=True,
-                    skip_reviewer_request=True,
-                ),
-            )
+            agent = Agent.create(**kwargs)
             text = prompt
             if branch:
                 text += f"\n\nPush the fix on branch `{branch}` and open a pull request."
@@ -92,7 +104,7 @@ class CursorClient:
                 "agent_id": agent.agent_id or run.agent_id,
                 "run_id": run.id or None,
                 "status": "running",
-                "model": model,
+                "model": model if model and model != "auto" else "auto",
                 "repo": repo_full_name,
             }
 
