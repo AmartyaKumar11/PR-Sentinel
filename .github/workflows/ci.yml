@@ -55,7 +55,7 @@ jobs:
       - name: Trigger PR Sentinel self-review
         env:
           SENTINEL_URL: ${{ secrets.SENTINEL_WEBHOOK_URL }}
-          WEBHOOK_SECRET: ${{ secrets.GITHUB_WEBHOOK_SECRET }}
+          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
         run: |
           BODY='{"action":"opened","pull_request":{"number":${{ github.event.pull_request.number }},"head":{"sha":"${{ github.event.pull_request.head.sha }}"}},"repository":{"full_name":"${{ github.repository }}"}}'
           SIGNATURE="sha256=$(echo -n "$BODY" | openssl dgst -sha256 -hmac "$WEBHOOK_SECRET" | awk '{print $2}')"

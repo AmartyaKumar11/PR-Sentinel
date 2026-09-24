@@ -8,7 +8,7 @@ from app.config import settings
 class LLMClient:
     def __init__(self):
         self.client = AsyncOpenAI(
-            api_key=settings.DEEPSEEK_API_KEY,
+            api_key=settings.DEEPSEEK_API_KEY or "unused",
             base_url=settings.DEEPSEEK_BASE_URL,
         )
         self.model = settings.LLM_MODEL
