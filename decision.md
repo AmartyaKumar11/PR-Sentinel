@@ -32,4 +32,11 @@ Format: **Decision** · **Why** · **Advantage** · **Expected** · **Actual**
 - **Why:** JEV-INTEGRATION-UPDATE — typed decisions, calibrated scores, cheaper triage.
 - **Advantage:** Lower cost/latency on triage/verify; Scenario 1 auth+missing → CRITICAL override.
 - **Expected:** Specs + client + assemble helpers; full agent loop later.
-- **Actual:** Specs patched; `JevClient` + helpers + DB columns live; orchestrator not wired yet. `JEV_API_KEY` accepted as `TYPESAFE_API_KEY` alias.
+- **Actual:** Specs + `JevClient` + helpers + DB columns live; orchestrator runs diagnose → Jev triage → dispatch / verify. `JEV_API_KEY` accepted as `TYPESAFE_API_KEY` alias.
+
+## D-005 — Follow BUILD-SEQUENCE.md phase gates
+- **Decision:** Build only via BUILD-SEQUENCE phases; no skip until exit gate passes.
+- **Why:** User directed; prevents half-wired agent before services/API land.
+- **Advantage:** Clear verify commands; fewer “works on my machine” gaps.
+- **Expected:** Phase 0 all 6 checks green → Phase 1 services.
+- **Actual:** Phase 0–9 PASS. Verify loop: fix push → Jev re-check → `resolved` + comment. Next: Phase 10 deploy.

@@ -88,10 +88,19 @@ def assemble_triage(diagnosis: dict, answers: dict, requirement_questions: dict,
         severity = "CRITICAL"
         action = "dispatch_urgent"
 
+    # Phantom PR (no linked issue) → at least MEDIUM review
+    phantom = diagnosis.get("is_phantom_pr") or answers["is_phantom_pr"].noul > 0.7
+    if phantom and severity in ("TRIVIAL", "LOW"):
+        severity = "MEDIUM"
+        if action in ("skip", "comment_only"):
+            action = "dispatch"
+
     files = diagnosis.get("changed_files") or []
     scope_creep = [
         files[i] for i, key in enumerate(scope_questions) if answers[key].noul < 0.3
     ]
+    if phantom and not scope_creep:
+        scope_creep = list(files)
 
     return {
         "severity": severity,
@@ -151,7 +160,7 @@ def assemble_verification(prev_missing: list, prev_scope: list, answers: dict) -
         for i, item in enumerate(prev_scope)
         if answers[f"scope_resolved_{i}"].noul > 0.6
     ]
-    all_resolved = len(remaining_items) == 0 and answers["new_issues"].noul < 0.3
+    all_resolved = len(remaining_items) == 0 and answers["new_issues"].noul < 0.5
     return {
         "all_resolved": all_resolved,
         "resolved_items": resolved_items,

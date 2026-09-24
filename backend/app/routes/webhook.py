@@ -6,6 +6,7 @@ import uuid
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 
+from app.agent.orchestrator import AgentOrchestrator
 from app.config import settings
 from app.database import get_db
 from app.services.task_manager import get_existing_task
@@ -13,6 +14,7 @@ from app.utils.hmac_verify import verify_hmac
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+_agent = AgentOrchestrator()
 
 
 @router.post("/api/webhook/github")
@@ -34,12 +36,13 @@ async def github_webhook(request: Request):
         return {"skipped": True, "reason": f"Action: {action}"}
 
     pr = payload["pull_request"]
-    repo = payload["repository"]["full_name"]
+    full = payload["repository"]["full_name"]
+    owner, repo = full.split("/", 1)
     pr_number = pr["number"]
     head_sha = pr["head"]["sha"]
 
     db = await get_db()
-    existing = await get_existing_task(db, repo, pr_number)
+    existing = await get_existing_task(db, full, pr_number)
 
     if action == "synchronize" and existing:
         task_id = existing["id"]
@@ -48,11 +51,8 @@ async def github_webhook(request: Request):
         task_id = str(uuid.uuid4())
         mode = "full"
 
-    # Agent wired in later — stub keeps webhook contract working for M-02
-    asyncio.create_task(_run_agent_stub(task_id, repo, pr_number, head_sha, mode))
+    asyncio.create_task(
+        _agent.run(task_id, owner, repo, pr_number, head_sha, mode=mode)
+    )
 
     return JSONResponse({"task_id": task_id}, status_code=202)
-
-
-async def _run_agent_stub(task_id: str, repo: str, pr_number: int, head_sha: str, mode: str):
-    logger.info("agent stub: task=%s repo=%s pr=#%s sha=%s mode=%s", task_id, repo, pr_number, head_sha, mode)

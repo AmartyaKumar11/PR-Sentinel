@@ -1,0 +1,62 @@
+{
+  "name": "pr-sentinel",
+  "displayName": "PR Sentinel",
+  "description": "AI-powered PR remediation — diagnostics delivered to your editor",
+  "version": "0.1.0",
+  "publisher": "amartya-kumar",
+  "engines": { "vscode": "^1.85.0" },
+  "categories": ["Other"],
+  "activationEvents": ["onStartupFinished"],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      { "command": "prSentinel.showTasks", "title": "PR Sentinel: Show Tasks" },
+      { "command": "prSentinel.acceptTask", "title": "PR Sentinel: Accept Task" },
+      { "command": "prSentinel.dismissTask", "title": "PR Sentinel: Dismiss Task" },
+      { "command": "prSentinel.showBlastRadius", "title": "PR Sentinel: Blast Radius" }
+    ],
+    "viewsContainers": {
+      "activitybar": [{
+        "id": "pr-sentinel",
+        "title": "PR Sentinel",
+        "icon": "$(shield)"
+      }]
+    },
+    "views": {
+      "pr-sentinel": [{
+        "type": "webview",
+        "id": "prSentinel.blastRadius",
+        "name": "Blast Radius"
+      }]
+    },
+    "configuration": {
+      "title": "PR Sentinel",
+      "properties": {
+        "prSentinel.backendUrl": {
+          "type": "string",
+          "default": "http://127.0.0.1:8000",
+          "description": "Backend API URL"
+        },
+        "prSentinel.pollIntervalSeconds": {
+          "type": "number",
+          "default": 30,
+          "description": "Task polling interval"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "webpack --mode production",
+    "watch": "webpack --mode development --watch",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^3.2.0",
+    "ts-loader": "^9.5.1",
+    "typescript": "^5.3.3",
+    "webpack": "^5.89.0",
+    "webpack-cli": "^5.1.4"
+  }
+}

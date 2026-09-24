@@ -1,0 +1,435 @@
+"""Phased agent: DIAGNOSE → Jev TRIAGE → DISPATCH / VERIFY."""
+
+from __future__ import annotations
+
+import json
+import logging
+import re
+
+from app.agent.composer_prompt import format_review_markdown, generate_composer_prompt
+from app.agent.parser import parse_agent_output
+from app.agent.prompts import DIAGNOSE_PROMPT
+from app.agent.tools.setup import build_tool_registry
+from app.database import get_db
+from app.services.diff_parser import extract_changed_identifiers, is_trivial_diff
+from app.services.jev_client import JevClient
+from app.services.jev_triage import (
+    assemble_triage,
+    assemble_verification,
+    build_triage_questions,
+    build_verify_questions,
+    trivial_check_questions,
+)
+from app.services.llm_client import LLMClient
+from app.services.sse_manager import sse_manager
+from app.services.task_manager import (
+    create_task,
+    get_task,
+    save_trace_step,
+    update_task_status,
+)
+
+logger = logging.getLogger(__name__)
+
+
+def _truncate(s: str, max_chars: int = 6000) -> str:
+    return s if len(s) <= max_chars else s[:max_chars] + "\n...truncated..."
+
+
+def _reqs_from_issue(issue: dict | None) -> list[str]:
+    if not issue:
+        return []
+    body = issue.get("body") or ""
+    bullets = re.findall(r"^[\-\*]\s+(.+)$", body, re.M)
+    if bullets:
+        return [b.strip() for b in bullets if len(b.strip()) > 3][:12]
+    # sentences as weak requirements
+    parts = [p.strip() for p in re.split(r"[.\n]", body) if len(p.strip()) > 15]
+    return parts[:5]
+
+
+class AgentOrchestrator:
+    def __init__(self, deepseek: LLMClient | None = None, jev: JevClient | None = None):
+        self.deepseek = deepseek or LLMClient()
+        self.jev = jev or JevClient()
+        self.sse = sse_manager
+
+    async def run(
+        self,
+        task_id: str,
+        owner: str,
+        repo: str,
+        pr_number: int,
+        head_sha: str,
+        mode: str = "full",
+    ):
+        try:
+            if mode == "full":
+                diagnosis = await self._run_diagnose(task_id, owner, repo, pr_number, head_sha)
+                if diagnosis.get("is_trivial"):
+                    triage = {
+                        "severity": "TRIVIAL",
+                        "action": "skip",
+                        "justification": "Trivial non-code PR",
+                        "suggested_fix_approach": "",
+                        "affected_files_priority": [],
+                        "intent_alignment": diagnosis.get("intent_alignment")
+                        or {"addressed": [], "missing": [], "scope_creep": []},
+                        "confidence_scores": {"is_trivial": 1.0},
+                    }
+                else:
+                    triage = await self._run_jev_triage(task_id, diagnosis)
+                await self._run_dispatch(
+                    task_id, owner, repo, pr_number, head_sha, diagnosis, triage
+                )
+            elif mode == "verify":
+                await self._run_jev_verify(task_id, owner, repo, pr_number, head_sha)
+        except Exception as e:
+            logger.exception("agent failed task=%s", task_id)
+            self.sse.emit(
+                task_id,
+                {"step": 0, "phase": "diagnose", "type": "error", "content": str(e)},
+            )
+            db = await get_db()
+            try:
+                await update_task_status(db, task_id, "error")
+            except Exception:
+                pass
+
+    async def _emit(self, task_id, step, phase, type_, content, **extra):
+        event = {"step": step, "phase": phase, "type": type_, "content": content, **extra}
+        self.sse.emit(task_id, event)
+        db = await get_db()
+        # only persist if task row exists (dispatch creates it) — skip early diagnose persist
+        # ponytail: write traces after task exists; for diagnose stash in memory via skip
+        try:
+            task = await get_task(db, task_id)
+            if task:
+                await save_trace_step(
+                    db,
+                    task_id,
+                    step,
+                    phase,
+                    type_,
+                    content if isinstance(content, str) else json.dumps(content)[:2000],
+                    tool_name=extra.get("tool"),
+                    tool_args=extra.get("args"),
+                )
+        except Exception:
+            pass
+
+    async def _run_diagnose(self, task_id, owner, repo, pr_number, head_sha) -> dict:
+        tools = build_tool_registry(owner, repo)
+        step = 0
+
+        await self._emit(task_id, step, "diagnose", "thought", "Fetching PR diff")
+        step += 1
+        await self._emit(
+            task_id, step, "diagnose", "action", f"fetch_pr_diff({pr_number})", tool="fetch_pr_diff", args={"pr_number": pr_number}
+        )
+        diff_result = await tools.execute("fetch_pr_diff", pr_number=pr_number)
+        raw_diff = diff_result.get("diff", "") if isinstance(diff_result, dict) else str(diff_result)
+        files = diff_result.get("files", []) if isinstance(diff_result, dict) else []
+        await self._emit(task_id, step, "diagnose", "observation", _truncate(raw_diff, 500))
+
+        # Jev fast-exit
+        step += 1
+        await self._emit(task_id, step, "diagnose", "thought", "Jev trivial check")
+        try:
+            trivial = await self.jev.evaluate(
+                state={"diff": _truncate(raw_diff, 4000)},
+                questions=trivial_check_questions(),
+            )
+            is_triv = trivial["is_trivial"].noul > 0.9
+            skip_graph = trivial["touches_functions"].noul < 0.2
+        except Exception as e:
+            logger.warning("jev trivial check failed: %s", e)
+            is_triv = is_trivial_diff(raw_diff)
+            skip_graph = is_triv
+
+        if is_triv:
+            diagnosis = {
+                "is_trivial": True,
+                "changed_files": files,
+                "changed_identifiers": [],
+                "linked_issue": None,
+                "is_phantom_pr": False,
+                "is_underspecified_issue": False,
+                "diff_summary": _truncate(raw_diff, 2000),
+                "intent_alignment": {"addressed": [], "missing": [], "scope_creep": []},
+                "blast_radius": {
+                    "directly_changed": [],
+                    "depth_1_impacted": [],
+                    "depth_2_impacted": [],
+                    "highest_risk_path": "",
+                    "risk_score": 0.0,
+                    "untested_impacted": [],
+                },
+            }
+            await self._emit(task_id, step, "diagnose", "answer", json.dumps(diagnosis))
+            return diagnosis
+
+        step += 1
+        await self._emit(task_id, step, "diagnose", "action", "fetch_linked_issue", tool="fetch_linked_issue")
+        issue = await tools.execute("fetch_linked_issue", pr_number=pr_number)
+        if isinstance(issue, dict) and issue.get("error"):
+            issue = None
+        await self._emit(task_id, step, "diagnose", "observation", json.dumps(issue)[:500] if issue else "null")
+
+        identifiers = extract_changed_identifiers(raw_diff)
+        blast = {
+            "directly_changed": identifiers,
+            "depth_1_impacted": [],
+            "depth_2_impacted": [],
+            "highest_risk_path": "",
+            "risk_score": 0.0,
+            "untested_impacted": [],
+        }
+        if not skip_graph and identifiers:
+            step += 1
+            await self._emit(task_id, step, "diagnose", "action", "build_dependency_graph", tool="build_dependency_graph")
+            graph = await tools.execute("build_dependency_graph", ref=head_sha, path_filter="src/")
+            step += 1
+            await self._emit(task_id, step, "diagnose", "action", "trace_blast_radius", tool="trace_blast_radius")
+            blast = await tools.execute(
+                "trace_blast_radius", changed_identifiers=identifiers, dep_graph=graph
+            )
+
+        reqs = _reqs_from_issue(issue)
+        phantom = issue is None
+        diagnosis = {
+            "is_trivial": False,
+            "changed_files": files,
+            "changed_identifiers": identifiers,
+            "linked_issue": (
+                {
+                    "number": issue["number"],
+                    "title": issue.get("title", ""),
+                    "body": issue.get("body", ""),
+                    "requirements": reqs,
+                }
+                if issue
+                else None
+            ),
+            "is_phantom_pr": phantom,
+            "is_underspecified_issue": bool(issue) and len(reqs) < 2,
+            "diff_summary": _truncate(raw_diff, 2000),
+            "intent_alignment": {
+                "addressed": [],
+                "missing": [],
+                "scope_creep": files if phantom else [],
+            },
+            "blast_radius": blast,
+        }
+        # DeepSeek fills intent when we have an issue (one short call)
+        if issue and reqs:
+            try:
+                msg = await self.deepseek.chat(
+                    system="Return only Answer: JSON with addressed/missing/scope_creep string arrays.",
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": (
+                                f"Requirements: {reqs}\nChanged files: {files}\n"
+                                f"Diff:\n{_truncate(raw_diff, 3000)}\n"
+                                'Answer: {"addressed":[],"missing":[],"scope_creep":[]}'
+                            ),
+                        }
+                    ],
+                )
+                parsed = parse_agent_output(msg)
+                if parsed.type == "answer":
+                    intent = json.loads(parsed.content)
+                    diagnosis["intent_alignment"].update(
+                        {
+                            "addressed": intent.get("addressed") or [],
+                            "missing": intent.get("missing") or [],
+                            "scope_creep": intent.get("scope_creep") or [],
+                        }
+                    )
+            except Exception as e:
+                logger.warning("intent LLM failed: %s", e)
+
+        step += 1
+        await self._emit(task_id, step, "diagnose", "answer", json.dumps(diagnosis)[:2000])
+        return diagnosis
+
+    async def _run_jev_triage(self, task_id, diagnosis) -> dict:
+        questions, req_q, scope_q = build_triage_questions(diagnosis)
+        br = diagnosis.get("blast_radius") or {}
+        state = {
+            "diff_summary": diagnosis.get("diff_summary", ""),
+            "issue_title": (diagnosis.get("linked_issue") or {}).get("title", ""),
+            "issue_body": (diagnosis.get("linked_issue") or {}).get("body", ""),
+            "changed_files": diagnosis.get("changed_files") or [],
+            "blast_radius": {
+                "impacted_count": len(br.get("depth_1_impacted") or [])
+                + len(br.get("depth_2_impacted") or []),
+                "untested_count": len(br.get("untested_impacted") or []),
+                "highest_risk_path": br.get("highest_risk_path", ""),
+            },
+        }
+        answers = await self.jev.evaluate(state=state, questions=questions)
+        triage = assemble_triage(diagnosis, answers, req_q, scope_q)
+        # Prefer Jev intent_alignment over diagnose stubs when scores exist
+        if triage.get("intent_alignment"):
+            diagnosis["intent_alignment"] = {
+                **diagnosis.get("intent_alignment", {}),
+                **{
+                    k: triage["intent_alignment"][k]
+                    for k in ("addressed", "missing", "scope_creep")
+                    if triage["intent_alignment"].get(k) is not None
+                },
+            }
+
+        # Narrative via DeepSeek
+        try:
+            narrative = await self.deepseek.chat(
+                system="You are a code review assistant. Reply with Answer: JSON only.",
+                messages=[
+                    {
+                        "role": "user",
+                        "content": (
+                            f"Missing: {triage['intent_alignment'].get('missing')}\n"
+                            f"Scope: {triage['intent_alignment'].get('scope_creep')}\n"
+                            f"Files: {diagnosis.get('changed_files')}\n"
+                            'Answer: {"suggested_fix_approach":"...","affected_files_priority":[{"path":"...","lines":[],"change_type":"modified"}]}'
+                        ),
+                    }
+                ],
+            )
+            parsed = parse_agent_output(narrative)
+            if parsed.type == "answer":
+                data = json.loads(parsed.content)
+                triage["suggested_fix_approach"] = data.get("suggested_fix_approach", "")
+                triage["affected_files_priority"] = data.get("affected_files_priority") or []
+        except Exception as e:
+            logger.warning("narrative LLM failed: %s", e)
+            triage["suggested_fix_approach"] = triage.get("justification", "")
+            triage["affected_files_priority"] = [
+                {"path": f, "lines": [], "change_type": "modified"}
+                for f in (diagnosis.get("changed_files") or [])[:5]
+            ]
+
+        self.sse.emit(
+            task_id,
+            {
+                "step": 0,
+                "phase": "triage",
+                "type": "answer",
+                "content": json.dumps(
+                    {"severity": triage["severity"], "action": triage["action"]}
+                ),
+            },
+        )
+        return triage
+
+    async def _run_dispatch(
+        self, task_id, owner, repo, pr_number, head_sha, diagnosis, triage
+    ):
+        # Sync intent onto diagnosis for templates
+        if triage.get("intent_alignment"):
+            diagnosis["intent_alignment"] = {
+                **diagnosis.get("intent_alignment", {}),
+                **triage["intent_alignment"],
+            }
+
+        composer = generate_composer_prompt(diagnosis, triage)
+        review_md = format_review_markdown(diagnosis, triage)
+        db = await get_db()
+        await create_task(
+            db,
+            task_id,
+            f"{owner}/{repo}",
+            pr_number,
+            head_sha,
+            triage["severity"],
+            triage["action"],
+            diagnosis,
+            triage,
+            review_md,
+            composer,
+        )
+
+        if triage.get("action") != "skip":
+            tools = build_tool_registry(owner, repo)
+            result = await tools.execute(
+                "post_pr_review", pr_number=pr_number, review_body=review_md
+            )
+            if isinstance(result, dict) and not result.get("error"):
+                await update_task_status(
+                    db,
+                    task_id,
+                    "dispatched",
+                    github_comment_id=result.get("id"),
+                    github_comment_url=result.get("html_url"),
+                )
+            else:
+                await update_task_status(db, task_id, "dispatched")
+
+        self.sse.emit(
+            task_id,
+            {"step": 0, "phase": "dispatch", "type": "answer", "content": "Task dispatched."},
+        )
+
+    async def _run_jev_verify(self, task_id, owner, repo, pr_number, head_sha):
+        db = await get_db()
+        task = await get_task(db, task_id)
+        if not task:
+            return
+        diagnosis = task.get("diagnosis_json")
+        if isinstance(diagnosis, str):
+            diagnosis = json.loads(diagnosis)
+        intent = (diagnosis or {}).get("intent_alignment") or {}
+        prev_missing = intent.get("missing") or []
+        prev_scope = intent.get("scope_creep") or []
+
+        tools = build_tool_registry(owner, repo)
+        diff_result = await tools.execute("fetch_pr_diff", pr_number=pr_number)
+        raw = diff_result.get("diff", "") if isinstance(diff_result, dict) else ""
+
+        questions = build_verify_questions(prev_missing, prev_scope)
+        answers = await self.jev.evaluate(
+            state={
+                "new_diff": _truncate(raw, 4000),
+                "original_issue": (diagnosis or {}).get("linked_issue") or {},
+                "previously_missing": prev_missing,
+                "previously_flagged_scope_creep": prev_scope,
+            },
+            questions=questions,
+        )
+        verification = assemble_verification(prev_missing, prev_scope, answers)
+
+        if verification["all_resolved"]:
+            await update_task_status(
+                db,
+                task_id,
+                "resolved",
+                resolved_sha=head_sha,
+                verification_json=json.dumps(verification),
+                is_verified=1,
+            )
+            await tools.execute(
+                "post_pr_review",
+                pr_number=pr_number,
+                review_body="PR Sentinel: All issues addressed.",
+            )
+        else:
+            await update_task_status(
+                db, task_id, "dispatched", verification_json=json.dumps(verification)
+            )
+            n = len(verification["remaining_items"])
+            await tools.execute(
+                "post_pr_review",
+                pr_number=pr_number,
+                review_body=f"PR Sentinel: {n} issues remain.",
+            )
+        self.sse.emit(
+            task_id,
+            {
+                "step": 0,
+                "phase": "verify",
+                "type": "answer",
+                "content": json.dumps(verification),
+            },
+        )

@@ -4,8 +4,8 @@ import json
 # Valid transitions from DATABASE.md
 _TRANSITIONS = {
     "pending": {"dispatched", "error"},
-    "dispatched": {"accepted", "dismissed", "error"},
-    "accepted": {"in_progress", "error"},
+    "dispatched": {"accepted", "dismissed", "error", "resolved", "in_progress"},
+    "accepted": {"in_progress", "error", "resolved"},
     "in_progress": {"resolved", "dispatched", "error"},
 }
 

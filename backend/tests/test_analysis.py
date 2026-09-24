@@ -3,7 +3,7 @@
 from pathlib import Path
 
 from app.services.blast_radius import trace_blast_radius
-from app.services.dep_graph import build_dependency_graph_from_dir
+from app.services.ast_parser import build_dependency_graph_from_dir
 from app.services.diff_parser import extract_changed_identifiers, is_trivial_diff
 from app.utils.hmac_verify import verify_hmac
 from app.agent.parser import parse_agent_output

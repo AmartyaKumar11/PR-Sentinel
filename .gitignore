@@ -35,3 +35,12 @@ extension/out/
 
 # Local
 ngrok*
+
+_demo_build/
+backend/.env
+backend/sentinel.db
+backend/*.db
+dashboard/node_modules/
+extension/node_modules/
+extension/*.vsix
+
