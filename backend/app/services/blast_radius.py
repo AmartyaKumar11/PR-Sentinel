@@ -9,11 +9,13 @@ def trace(changed_identifiers: list[str], dep_graph: dict) -> dict:
     """BFS reverse dependents of changed identifiers."""
     nodes = {n["id"]: n for n in dep_graph.get("nodes", [])}
     reverse: dict[str, list[str]] = defaultdict(list)
+    forward: dict[str, list[str]] = defaultdict(list)
     for e in dep_graph.get("edges", []):
         src = e.get("from") or e.get("source")
         tgt = e.get("to") or e.get("target")
         if src and tgt:
             reverse[tgt].append(src)
+            forward[src].append(tgt)
 
     seeds = []
     for cid in changed_identifiers:
@@ -37,6 +39,12 @@ def trace(changed_identifiers: list[str], dep_graph: dict) -> dict:
             if caller not in depth_of:
                 depth_of[caller] = d + 1
                 q.append((caller, d + 1))
+
+    # A brand-new function has no callers. Its callees are the first hop.
+    for s in list(seeds):
+        for callee in forward.get(s, []):
+            if callee not in depth_of:
+                depth_of[callee] = 1
 
     directly = [n for n, d in depth_of.items() if d == 0]
     depth_1 = [n for n, d in depth_of.items() if d == 1]
@@ -74,7 +82,7 @@ def trace(changed_identifiers: list[str], dep_graph: dict) -> dict:
         "depth_1_impacted": depth_1,
         "depth_2_impacted": depth_2,
         "depth_3_impacted": depth_3,
-        "highest_risk_path": _highest_path(seeds, reverse, depth_of),
+        "highest_risk_path": _highest_path(seeds, reverse, depth_of, forward),
         "risk_score": round(risk, 2),
         "untested_impacted": untested,
         "untested": untested,
@@ -101,10 +109,14 @@ def _has_test(src_path: str, files_in_graph: set) -> bool:
     return name in {"auth", "users", "orders"}
 
 
-def _highest_path(seeds: list[str], reverse: dict, depth_of: dict) -> str:
+def _highest_path(seeds: list[str], reverse: dict, depth_of: dict, forward: dict | None = None) -> str:
     if not seeds or not depth_of:
         return seeds[0] if seeds else ""
     deepest = max(depth_of, key=depth_of.get)
+    if forward and deepest not in seeds:
+        for s in seeds:
+            if deepest in forward.get(s, []):
+                return f"{s} → {deepest}"
     parent: dict[str, str | None] = {s: None for s in seeds}
     q = deque(seeds)
     while q:
@@ -119,4 +131,8 @@ def _highest_path(seeds: list[str], reverse: dict, depth_of: dict) -> str:
         chain.append(cur)
         cur = parent.get(cur)
     chain.reverse()
+    if len(chain) == 1 and forward:
+        callees = [c for c in forward.get(chain[0], []) if c in depth_of]
+        if callees:
+            chain.append(callees[0])
     return " → ".join(chain) if chain else deepest

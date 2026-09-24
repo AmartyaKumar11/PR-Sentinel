@@ -35,7 +35,8 @@ def build_tool_registry(owner: str, repo: str, gh: GitHubClient | None = None) -
         try:
             key = f"depgraph:{owner}/{repo}:{ref}:{path_filter}"
             cached = await cache_svc.cache_get(key)
-            if cached:
+            # An empty graph is a failed parse (UTF-8 BOM), not a valid SHA snapshot.
+            if cached and cached.get("nodes"):
                 return cached
             paths = await gh.get_file_tree(owner, repo, ref, path_filter)
             files: dict[str, str] = {}
@@ -45,7 +46,8 @@ def build_tool_registry(owner: str, repo: str, gh: GitHubClient | None = None) -
                 except Exception:
                     continue
             graph = build_graph(files)
-            await cache_svc.cache_set(key, graph)
+            if graph.get("nodes"):
+                await cache_svc.cache_set(key, graph)
             return graph
         except Exception as e:
             return {"error": str(e), "nodes": [], "edges": []}

@@ -33,6 +33,8 @@ def parse_file(file_path: str, source_code: str) -> tuple[list[GraphNode], list[
     nodes: list[GraphNode] = []
     edges: list[GraphEdge] = []
     mod = _module_name(file_path)
+    # GitHub contents are often UTF-8 with BOM; ast.parse rejects U+FEFF.
+    source_code = source_code.lstrip("\ufeff")
     try:
         tree = ast.parse(source_code)
     except SyntaxError:
@@ -54,7 +56,8 @@ def parse_file(file_path: str, source_code: str) -> tuple[list[GraphNode], list[
             local_defs[node.name] = qid
 
     aliases: dict[str, str] = {}
-    for node in tree.body:
+    # Function-body imports (the password-reset demo does this) must resolve too.
+    for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom) and node.module:
             for a in node.names:
                 local = a.asname or a.name

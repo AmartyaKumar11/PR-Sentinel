@@ -66,9 +66,12 @@ async def run_diagnose(agent, task_id, owner, repo, pr_number, head_sha) -> dict
     if buffered <= 0:
         raise AssertionError("no trace steps")
     missing = intent.get("missing") or []
+    br = diagnosis.get("blast_radius") or {}
+    path = br.get("highest_risk_path") or "N/A"
+    depth_1 = br.get("depth_1_impacted") or []
     return {
         "diagnosis": diagnosis,
-        "detail": f"{len(missing)} missing, risk {risk}",
+        "detail": f"{len(missing)} missing, risk {risk}, path {path}, depth_1 {depth_1}",
     }
 
 
