@@ -31,12 +31,21 @@ def classify_ci(status: dict | None, runs: list | None) -> str:
     return "no_ci"
 
 
-def judge_alignment(scores: dict[str, float], regression: float, _contained: float = 0) -> str:
+def _regression_limit(scores: dict[str, float], ci: str) -> float:
+    # A strong fix with CI green can sit above 0.5 without being a real regression.
+    if ci == "passed" and scores and all(v > 0.8 for v in scores.values()):
+        return 0.7
+    return 0.5
+
+
+def judge_alignment(
+    scores: dict[str, float], regression: float, _contained: float = 0, *, ci: str = "passed"
+) -> str:
     if any(v < 0.4 for v in scores.values()):
         return "fail"
     if any(v <= 0.6 for v in scores.values()):
         return "partial"
-    if regression < 0.3:
+    if regression < _regression_limit(scores, ci):
         return "pass"
     return "fail"
 
@@ -80,7 +89,14 @@ def _noul(answer) -> float:
     return float(getattr(answer, "noul", 0) or 0)
 
 
-def _summary(ci: str, alignment: str | None, scores: dict, sanity: dict | None, verdict: str) -> str:
+def _summary(
+    ci: str,
+    alignment: str | None,
+    scores: dict,
+    sanity: dict | None,
+    verdict: str,
+    regression: float | None = None,
+) -> str:
     if verdict == "passed":
         return (
             "All checks passed. Fix addresses the missing requirements, "
@@ -90,7 +106,11 @@ def _summary(ci: str, alignment: str | None, scores: dict, sanity: dict | None, 
         return f"CI {ci}. Later checks were skipped."
     if alignment == "fail":
         weak = [name for name, score in scores.items() if score < 0.4]
-        return "Fix does not address: " + (", ".join(weak) or "the missing requirements") + "."
+        if weak:
+            return "Fix does not address: " + ", ".join(weak) + "."
+        if regression is not None:
+            return f"Regression risk {regression:.2f} is above the allowed threshold."
+        return "Fix does not address the missing requirements."
     if verdict == "partial":
         mid = [name for name, score in scores.items() if 0.4 <= score <= 0.6]
         return "Uncertain whether the fix covers: " + ", ".join(mid) + "."
@@ -118,7 +138,7 @@ def _result(ci, scores, regression, sanity, alignment, verdict) -> dict:
             "test_files_deleted": False,
             "ci_config_modified": False,
         },
-        "summary": _summary(ci, alignment, scores, sanity, verdict),
+        "summary": _summary(ci, alignment, scores, sanity, verdict, regression),
     }
 
 
@@ -178,7 +198,7 @@ async def validate(
         )
         scores = {req: _noul(answers[f"req_{i}"]) for i, req in enumerate(missing)}
         regression = _noul(answers["introduces_regression"])
-        alignment = judge_alignment(scores, regression)
+        alignment = judge_alignment(scores, regression, ci=ci)
         if alignment == "fail":
             return _result(ci, scores, regression, None, alignment, "failed")
 

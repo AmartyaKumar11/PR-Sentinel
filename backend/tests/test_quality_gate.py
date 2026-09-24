@@ -30,6 +30,9 @@ def test_alignment_bands():
     assert judge_alignment({"Validate email format": 0.5}, 0.05, 0.9) == "partial"
     assert judge_alignment({"Validate email format": 0.2}, 0.05, 0.9) == "fail"
     assert judge_alignment({"Validate email format": 0.9}, 0.8, 0.9) == "fail"
+    assert judge_alignment({"Validate email format": 0.97}, 0.64, ci="passed") == "pass"
+    assert judge_alignment({"Validate email format": 0.7}, 0.55, ci="passed") == "fail"
+    assert judge_alignment({"Validate email format": 0.97}, 0.64, ci="no_ci") == "fail"
 
 
 def test_diff_sanity_flags():

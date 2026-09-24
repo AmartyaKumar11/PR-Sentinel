@@ -6,19 +6,57 @@ import json
 
 from app.services.llm_client import LLMClient
 
-PROMPT_CRAFT_SYSTEM = """You are an expert at writing prompts for AI coding agents.
-Given a PR diagnosis, write a prompt that a Cursor Cloud Agent will execute to fix the code.
+PROMPT_CRAFT_SYSTEM = """You write fix instructions for a Cursor Cloud Agent working on a real codebase. The agent will read your instructions and generate code autonomously. Your prompt determines the quality of that code.
 
-RULES FOR THE PROMPT:
-1. Start with a one-sentence summary of what needs to be fixed.
-2. List each requirement that is missing, with the EXACT file and function that needs to change.
-3. For each fix, describe the approach in 2-3 sentences. Do NOT write the code — describe what the code should do.
-4. List constraints: don't break existing tests, don't modify unrelated files, match the repo's code style.
-5. End with verification steps: what tests to run, what to check.
-6. Keep the total prompt under 800 words — Cursor agents work better with focused instructions.
-7. Use markdown formatting with clear headers.
+RULES:
 
-DO NOT include generic boilerplate. Every sentence must be actionable."""
+1. WHAT to fix — be explicit about each requirement. Not "add email validation." Instead: "Validate the email parameter in reset_password() before any other logic runs. Use Python's email.utils.parseaddr or a regex that handles standard RFC 5322 addresses. Return a clear error response (not an exception) when the format is invalid. Do not send the reset email if validation fails."
+
+2. WHERE to fix — name the exact file, function, and where in the function the change goes. "In src/auth.py, inside reset_password(), before the call to generate_reset_token()."
+
+3. HOW to fix — describe the approach, not the code. But be specific about the pattern. "Use a constant-time comparison for token validation to avoid timing attacks. Store expires_at as a UTC datetime, not a relative offset."
+
+4. WHAT NOT to do — constraints prevent the agent from going rogue:
+   - Do not modify function signatures unless required
+   - Do not add new dependencies without justification
+   - Do not refactor unrelated code
+   - Do not change test infrastructure or CI configuration
+   - Match the existing code style (indentation, naming, docstring format)
+
+5. TESTS — always require tests for the new behavior:
+   "Add test cases to tests/test_auth.py:
+   - test_reset_password_invalid_email: pass a malformed email, verify it returns an error without sending
+   - test_reset_password_expired_token: create a token, advance time past 1 hour, verify validation rejects it
+   - test_reset_password_valid_flow: verify the happy path still works after the changes"
+
+6. VERIFICATION — tell the agent how to check its own work:
+   "After making changes, run: pytest tests/ -v
+   All existing tests must pass. The new tests must pass.
+   If any test fails, fix the code, not the test."
+
+7. SECURITY — flag security-sensitive changes:
+   "This touches authentication code. Do not:
+   - Log email addresses or tokens at INFO level
+   - Return different error messages for 'email not found' vs 'invalid email' (prevents user enumeration)
+   - Store tokens in plaintext"
+
+8. Keep the prompt under 1000 words. Dense and specific beats long and vague.
+
+OUTPUT FORMAT:
+# Fix: [one-line summary]
+
+## Requirements
+[numbered list, each with file, function, and approach]
+
+## Constraints
+[what not to do]
+
+## Tests required
+[specific test cases with names and assertions]
+
+## Verification
+[how to check the fix works]
+"""
 
 
 async def craft_prompt(
@@ -38,6 +76,7 @@ async def craft_prompt(
         "scope_creep": (diagnosis.get("intent_alignment") or {}).get("scope_creep", []),
         "addressed": (diagnosis.get("intent_alignment") or {}).get("addressed", []),
         "changed_files": diagnosis.get("changed_files", []),
+        "changed_identifiers": diagnosis.get("changed_identifiers", []),
         "blast_radius": {
             "risk_score": (diagnosis.get("blast_radius") or {}).get("risk_score", 0),
             "highest_risk_path": (diagnosis.get("blast_radius") or {}).get("highest_risk_path", ""),
@@ -48,9 +87,13 @@ async def craft_prompt(
         "suggested_fix": triage.get("suggested_fix_approach", ""),
         "affected_files": triage.get("affected_files_priority", []),
     }
+    diff = (diagnosis.get("diff_summary") or "")[:2000]
     user_msg = (
-        "Craft a Cursor Cloud Agent prompt for this PR fix:\n\n"
+        "Craft a Cursor Cloud Agent prompt for this PR fix.\n\n"
         f"{json.dumps(context, indent=2)}\n\n"
+        "Current diff, truncated to the changed code. Reference these real functions "
+        "and the order they run, not just the file names:\n"
+        f"{diff}\n\n"
         "The agent will be launched on the repository with full codebase access.\n"
         "It should create a fix branch and open a pull request when done."
     )
