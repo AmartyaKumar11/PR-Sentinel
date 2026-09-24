@@ -337,6 +337,28 @@ async def test_github_client_four_methods_mocked():
     await gh.close()
 
 
+async def test_merge_pr_marks_draft_ready():
+    puts = {"n": 0}
+
+    def handler(request: httpx.Request) -> Response:
+        if request.method == "PUT":
+            puts["n"] += 1
+            if puts["n"] == 1:
+                return Response(405, text='{"message":"Pull Request is still a draft","status":"405"}')
+            return Response(200, json={"merged": True, "message": "merged"})
+        if request.method == "PATCH":
+            return Response(200, json={"draft": False})
+        return Response(404)
+
+    gh = GitHubClient(token="fake", owner="o", repo="r")
+    await gh._client.aclose()
+    gh._client = httpx.AsyncClient(base_url="https://api.github.com", transport=MockTransport(handler))
+    result = await gh.merge_pr("o", "r", 20)
+    await gh.close()
+    assert result["merged"] is True
+    assert puts["n"] == 2
+
+
 if __name__ == "__main__":
     import asyncio
 

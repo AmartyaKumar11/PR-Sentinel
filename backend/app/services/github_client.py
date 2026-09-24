@@ -174,10 +174,17 @@ class GitHubClient:
         return await self.get_file_tree(self.owner, self.repo, ref, path_filter)
 
     async def merge_pr(self, owner: str, repo: str, pr_number: int, merge_method: str = "squash") -> dict:
-        r = await self._client.put(
-            f"/repos/{owner}/{repo}/pulls/{pr_number}/merge",
-            json={"merge_method": merge_method},
-        )
+        path = f"/repos/{owner}/{repo}/pulls/{pr_number}/merge"
+        body = {"merge_method": merge_method}
+        r = await self._client.put(path, json=body)
+        # Cursor opens the fix as a draft. GitHub returns 405 until it is marked ready.
+        if r.status_code == 405 and "draft" in r.text.lower():
+            ready = await self._client.patch(
+                f"/repos/{owner}/{repo}/pulls/{pr_number}",
+                json={"draft": False},
+            )
+            if ready.status_code < 400:
+                r = await self._client.put(path, json=body)
         if r.status_code >= 400:
             return {"merged": False, "message": r.text[:300]}
         data = r.json()
