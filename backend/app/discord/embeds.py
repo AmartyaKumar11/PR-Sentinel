@@ -110,3 +110,53 @@ def build_verification_embed(verification: dict) -> discord.Embed:
             inline=False,
         )
     return embed
+
+
+def build_validation_failed_embed(gate: dict, result: dict) -> discord.Embed:
+    embed = discord.Embed(
+        title="Validation Failed",
+        description=(gate.get("summary") or "The fix did not pass the quality gate.")[:500],
+        color=0xEF4444,
+    )
+    embed.add_field(name="CI", value=str(gate.get("ci_status") or "n/a"), inline=True)
+    scores = gate.get("requirement_alignment") or {}
+    if scores:
+        embed.add_field(
+            name="Requirements",
+            value="\n".join(f"• {name}: {score:.2f}" for name, score in list(scores.items())[:6])[:1000],
+            inline=False,
+        )
+    sanity = gate.get("diff_sanity") or {}
+    outside = sanity.get("files_outside_blast_radius") or []
+    if outside or sanity.get("test_files_deleted") or sanity.get("ci_config_modified"):
+        embed.add_field(
+            name="Diff",
+            value=(
+                f"Lines: {sanity.get('lines_changed', 0)}\n"
+                f"Outside blast radius: {', '.join(outside) or 'none'}\n"
+                f"Tests deleted: {sanity.get('test_files_deleted')}\n"
+                f"CI config touched: {sanity.get('ci_config_modified')}"
+            )[:1000],
+            inline=False,
+        )
+    if result.get("pr_url"):
+        embed.add_field(name="Pull Request", value=result["pr_url"], inline=False)
+    return embed
+
+
+def build_needs_review_embed(gate: dict, result: dict) -> discord.Embed:
+    scores = gate.get("requirement_alignment") or {}
+    unsure = [f"• {name}: {score:.2f}" for name, score in scores.items() if 0.4 <= score <= 0.6]
+    embed = discord.Embed(
+        title="Needs Review",
+        description=(gate.get("summary") or "Alignment is uncertain.")[:500],
+        color=0xEAB308,
+    )
+    embed.add_field(
+        name="Uncertain requirements",
+        value="\n".join(unsure)[:1000] or "none",
+        inline=False,
+    )
+    if result.get("pr_url"):
+        embed.add_field(name="Pull Request", value=result["pr_url"], inline=False)
+    return embed

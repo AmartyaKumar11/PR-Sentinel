@@ -6,6 +6,8 @@ from app.config import settings
 
 
 class JevClient:
+    calls = 0
+
     def __init__(self):
         from typesafe_sdk import AsyncTypeSafeClient
 
@@ -18,6 +20,7 @@ class JevClient:
         """Single parallel pass — all questions answered at once."""
         if not settings.typesafe_api_key:
             raise RuntimeError("JEV API key is not set")
+        JevClient.calls += 1
         response = await self.client.system_one(state=state, questions=questions)
         # SDK exposes answers; some versions also mirror as choices
         return getattr(response, "answers", None) or getattr(response, "choices", {})
