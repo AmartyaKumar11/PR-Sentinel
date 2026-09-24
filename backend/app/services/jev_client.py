@@ -10,7 +10,7 @@ class JevClient:
         from typesafe_sdk import AsyncTypeSafeClient
 
         self.client = AsyncTypeSafeClient(
-            api_key=settings.typesafe_api_key or None,
+            api_key=settings.typesafe_api_key or "unused",
             model=settings.JEV_MODEL,
         )
 
