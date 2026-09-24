@@ -74,7 +74,9 @@ async def get_db() -> aiosqlite.Connection:
     if _db is None:
         _db = await aiosqlite.connect(settings.DATABASE_PATH)
         _db.row_factory = aiosqlite.Row
-        await _db.execute("PRAGMA journal_mode=WAL")
+        # WAL needs a real file; :memory: stays in rollback journal mode.
+        if settings.DATABASE_PATH != ":memory:":
+            await _db.execute("PRAGMA journal_mode=WAL")
         await _db.execute("PRAGMA foreign_keys=ON")
         await _init_schema(_db)
     return _db

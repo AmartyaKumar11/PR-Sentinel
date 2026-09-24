@@ -17,9 +17,9 @@ jobs:
         with:
           python-version: "3.11"
       - run: pip install -r requirements.txt
-      - run: pip install pytest pytest-asyncio ruff
+      - run: pip install pytest pytest-asyncio pytest-timeout ruff
       - run: ruff check app/
-      - run: pytest tests/ -v --tb=short
+      - run: pytest tests/ -v --tb=short --timeout=10
 
   dashboard-build:
     runs-on: ubuntu-latest

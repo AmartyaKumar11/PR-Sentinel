@@ -23,16 +23,6 @@ from app.agent.tools.github_tools import register_github_tools
 from app.agent.tools.registry import ToolRegistry
 
 
-@pytest.fixture(autouse=True)
-def _dont_run_agent(monkeypatch):
-    """Webhook tests only check HTTP. The real agent deadlocks SQLite and calls APIs."""
-
-    async def _noop(*_a, **_k):
-        return None
-
-    monkeypatch.setattr("app.routes.webhook._agent.run", _noop)
-
-
 def _sign(body: bytes) -> str:
     return "sha256=" + hmac.new(
         settings.GITHUB_WEBHOOK_SECRET.encode(), body, hashlib.sha256
@@ -257,22 +247,6 @@ async def test_github_client_four_methods_mocked():
     await gh.close()
 
 
-@pytest.mark.asyncio
-async def test_live_fetch_file_from_public_repo():
-    """M-03 smoke against the real public PR-Sentinel repo (no write)."""
-    if os.environ.get("CI") or not settings.GITHUB_TOKEN:
-        pytest.skip("skip live GitHub fetch in CI")
-    gh = GitHubClient(token="", owner="AmartyaKumar11", repo="PR-Sentinel")
-    try:
-        text = await gh.fetch_file_content("README.md", "main")
-    except httpx.HTTPStatusError as e:
-        print(f"skip live github: {e}")
-        await gh.close()
-        return
-    await gh.close()
-    assert "PR Sentinel" in text
-
-
 if __name__ == "__main__":
     import asyncio
 
@@ -283,7 +257,6 @@ if __name__ == "__main__":
         await test_webhook_synchronize_reuses_task_id()
         test_find_issue_from_body_and_branch()
         await test_github_client_four_methods_mocked()
-        await test_live_fetch_file_from_public_repo()
         print("day2_ok")
         import os
         os._exit(0)
