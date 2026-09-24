@@ -67,6 +67,11 @@ diff --git a/.cursor/rules.md b/.cursor/rules.md
 @@ -1 +1 @@
 -old
 +rule
+diff --git a/.gitignore b/.gitignore
+--- a/.gitignore
++++ b/.gitignore
+@@ -1 +1,2 @@
++*.pyc
 diff --git a/src/billing.py b/src/billing.py
 --- a/src/billing.py
 +++ b/src/billing.py
