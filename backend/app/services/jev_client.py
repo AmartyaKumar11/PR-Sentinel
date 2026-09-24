@@ -16,6 +16,8 @@ class JevClient:
 
     async def evaluate(self, state: dict, questions: dict) -> dict:
         """Single parallel pass — all questions answered at once."""
+        if not settings.typesafe_api_key:
+            raise RuntimeError("JEV API key is not set")
         response = await self.client.system_one(state=state, questions=questions)
         # SDK exposes answers; some versions also mirror as choices
         return getattr(response, "answers", None) or getattr(response, "choices", {})

@@ -16,6 +16,8 @@ class LLMClient:
         self.temperature = settings.LLM_TEMPERATURE
 
     async def chat(self, system: str, messages: list[dict]) -> str:
+        if not settings.DEEPSEEK_API_KEY:
+            raise RuntimeError("DEEPSEEK_API_KEY is not set")
         response = await self.client.chat.completions.create(
             model=self.model,
             messages=[{"role": "system", "content": system}] + messages,
