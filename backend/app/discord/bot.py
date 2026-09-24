@@ -5,8 +5,14 @@ from discord.ext import commands
 
 from app.config import settings
 from app.discord.commands import setup_commands
-from app.discord.embeds import build_agent_result_embed, build_task_embed, build_verification_embed
-from app.discord.views import ApprovalView, ReviewView
+from app.discord.embeds import (
+    build_agent_result_embed,
+    build_needs_review_embed,
+    build_task_embed,
+    build_validation_failed_embed,
+    build_verification_embed,
+)
+from app.discord.views import ApprovalView, FailedGateView, PartialGateView, ReviewView
 
 
 class SentinelBot(commands.Bot):
@@ -40,11 +46,26 @@ class SentinelBot(commands.Bot):
         view = ApprovalView(task_id=task["id"], repo=task["repo"], pr_number=task["pr_number"])
         await self.channel.send(embed=embed, view=view)
 
-    async def send_agent_complete(self, task_id: str, result: dict):
+    async def send_agent_complete(self, task_id: str, result: dict, view=None):
         if self.channel is None:
             return
-        embed = build_agent_result_embed(result)
-        view = ReviewView(task_id=task_id, pr_url=result.get("pr_url"))
+        await self.channel.send(embed=build_agent_result_embed(result), view=view)
+
+    async def send_gate_result(self, task_id: str, result: dict, gate: dict):
+        if self.channel is None:
+            return
+        pr_url = result.get("pr_url")
+        verdict = gate.get("verdict")
+        if verdict == "passed":
+            embed = build_agent_result_embed(result)
+            embed.add_field(name="Quality gate", value=(gate.get("summary") or "")[:1000], inline=False)
+            view = ReviewView(task_id=task_id, pr_url=pr_url)
+        elif verdict == "partial":
+            embed = build_needs_review_embed(gate, result)
+            view = PartialGateView(task_id=task_id, pr_url=pr_url)
+        else:
+            embed = build_validation_failed_embed(gate, result)
+            view = FailedGateView(task_id=task_id, pr_url=pr_url)
         await self.channel.send(embed=embed, view=view)
 
     async def send_verification_result(self, task_id: str, verification: dict):

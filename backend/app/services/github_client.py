@@ -63,6 +63,16 @@ class GitHubClient:
             for f in r.json()
         ]
 
+    async def get_commit_status(self, owner: str, repo: str, sha: str) -> dict:
+        r = await self._client.get(f"/repos/{owner}/{repo}/commits/{sha}/status")
+        r.raise_for_status()
+        return r.json()
+
+    async def get_check_runs(self, owner: str, repo: str, sha: str) -> list:
+        r = await self._client.get(f"/repos/{owner}/{repo}/commits/{sha}/check-runs")
+        r.raise_for_status()
+        return r.json().get("check_runs") or []
+
     async def get_pr_info(self, owner: str, repo: str, pr_number: int) -> dict:
         r = await self._client.get(f"/repos/{owner}/{repo}/pulls/{pr_number}")
         r.raise_for_status()

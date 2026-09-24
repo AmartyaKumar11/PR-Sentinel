@@ -127,8 +127,20 @@ class ApprovalView(discord.ui.View):
                 return
             if status["status"] not in ("completed", "failed", "cancelled", "expired"):
                 continue
-            status["quality_warning"] = await _quality_warning(self.task_id, status)
-            await bot.send_agent_complete(self.task_id, status)
+            if status["status"] != "completed" or not status.get("pr_url"):
+                await bot.send_agent_complete(self.task_id, status)
+                return
+            try:
+                gate = await _store_gate(self.task_id, status)
+            except Exception as exc:
+                logger.exception("quality gate failed task=%s", self.task_id)
+                gate = {
+                    "passed": False,
+                    "verdict": "failed",
+                    "ci_status": "failed",
+                    "summary": f"Quality gate failed: {exc}",
+                }
+            await bot.send_gate_result(self.task_id, status, gate)
             return
 
 
@@ -143,20 +155,7 @@ class ReviewView(discord.ui.View):
     async def merge(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await owner_only(interaction):
             return
-        await interaction.response.defer(thinking=True)
-        parsed = parse_pr_url(self.pr_url or "")
-        if not parsed:
-            await interaction.followup.send("No PR URL available.", ephemeral=True)
-            return
-        owner, repo, pr_num = parsed
-        result = await GitHubClient().merge_pr(owner, repo, pr_num)
-        if result.get("merged"):
-            await interaction.followup.send(f"✅ PR #{pr_num} merged!")
-        else:
-            await interaction.followup.send(f"❌ Merge failed: {result.get('message', 'unknown error')}")
-        for child in self.children:
-            child.disabled = True
-        await interaction.message.edit(view=self)
+        await _merge_pr(interaction, self.pr_url, self)
 
     @discord.ui.button(label="Reject Fix", style=discord.ButtonStyle.red, emoji="🚫")
     async def reject_fix(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -176,24 +175,156 @@ class ReviewView(discord.ui.View):
     async def rerun(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await owner_only(interaction):
             return
-        await interaction.response.defer(thinking=True)
-        db = await get_db()
-        task = await get_task(db, self.task_id)
-        if not task:
-            await interaction.followup.send("Task not found.", ephemeral=True)
+        await _relaunch(interaction, self.task_id)
+
+
+class FailedGateView(discord.ui.View):
+    def __init__(self, task_id: str, pr_url: str | None = None):
+        super().__init__(timeout=None)
+        self.task_id = task_id
+        self.pr_url = pr_url
+        self.confirmed = False
+        _tag(self, task_id)
+
+    @discord.ui.button(label="Re-run Agent", style=discord.ButtonStyle.blurple, emoji="🔄")
+    async def rerun(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await owner_only(interaction):
             return
-        result = await cursor.launch_agent(
-            repo_full_name=task["repo"],
-            prompt=task.get("composer_prompt") or "",
+        await _relaunch(interaction, self.task_id)
+
+    @discord.ui.button(label="Override & Merge", style=discord.ButtonStyle.green, emoji="⚠️")
+    async def override(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await owner_only(interaction):
+            return
+        if not self.confirmed:
+            self.confirmed = True
+            parsed = parse_pr_url(self.pr_url or "")
+            number = parsed[2] if parsed else "?"
+            await interaction.response.send_message(
+                f"Are you sure? This will merge PR #{number}. Click Override & Merge again to confirm.",
+                ephemeral=True,
+            )
+            return
+        await _merge_pr(interaction, self.pr_url, self)
+
+    @discord.ui.button(label="Dismiss", style=discord.ButtonStyle.red, emoji="🗑️")
+    async def dismiss(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await _dismiss(interaction, self.task_id, self)
+
+
+class PartialGateView(discord.ui.View):
+    def __init__(self, task_id: str, pr_url: str | None = None):
+        super().__init__(timeout=None)
+        self.task_id = task_id
+        self.pr_url = pr_url
+        _tag(self, task_id)
+
+    @discord.ui.button(label="Merge Anyway", style=discord.ButtonStyle.green, emoji="🔀")
+    async def merge(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await owner_only(interaction):
+            return
+        await _merge_pr(interaction, self.pr_url, self)
+
+    @discord.ui.button(label="Re-run Agent", style=discord.ButtonStyle.blurple, emoji="🔄")
+    async def rerun(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await owner_only(interaction):
+            return
+        await _relaunch(interaction, self.task_id)
+
+    @discord.ui.button(label="Dismiss", style=discord.ButtonStyle.red, emoji="🗑️")
+    async def dismiss(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await _dismiss(interaction, self.task_id, self)
+
+
+async def _merge_pr(interaction: discord.Interaction, pr_url: str | None, view: discord.ui.View) -> None:
+    await interaction.response.defer(thinking=True)
+    parsed = parse_pr_url(pr_url or "")
+    if not parsed:
+        await interaction.followup.send("No PR URL available.", ephemeral=True)
+        return
+    owner, repo, pr_num = parsed
+    result = await GitHubClient().merge_pr(owner, repo, pr_num)
+    if result.get("merged"):
+        await interaction.followup.send(f"✅ PR #{pr_num} merged!")
+    else:
+        await interaction.followup.send(f"❌ Merge failed: {result.get('message', 'unknown error')}")
+    for child in view.children:
+        child.disabled = True
+    if interaction.message:
+        await interaction.message.edit(view=view)
+
+
+async def _relaunch(interaction: discord.Interaction, task_id: str) -> None:
+    await interaction.response.defer(thinking=True)
+    db = await get_db()
+    task = await get_task(db, task_id)
+    if not task:
+        await interaction.followup.send("Task not found.", ephemeral=True)
+        return
+    result = await cursor.launch_agent(
+        repo_full_name=task["repo"],
+        prompt=task.get("composer_prompt") or "",
+    )
+    await db.execute(
+        "UPDATE tasks SET cursor_agent_id = ? WHERE id = ?",
+        (result["agent_id"], task_id),
+    )
+    await db.commit()
+    await interaction.followup.send(
+        f"🔄 Re-launched agent `{result['agent_id']}` with model {result['model']}"
+    )
+
+
+async def _dismiss(interaction: discord.Interaction, task_id: str, view: discord.ui.View) -> None:
+    if not await owner_only(interaction):
+        return
+    try:
+        await update_task_status(await get_db(), task_id, "dismissed")
+    except ValueError as exc:
+        await interaction.response.send_message(str(exc), ephemeral=True)
+        return
+    await interaction.response.send_message("Task dismissed.", ephemeral=True)
+    for child in view.children:
+        child.disabled = True
+    if interaction.message:
+        await interaction.message.edit(view=view)
+
+
+async def _store_gate(task_id: str, status: dict) -> dict:
+    import json
+
+    from app.services.quality_gate import validate
+
+    parsed = parse_pr_url(status.get("pr_url") or "")
+    if not parsed:
+        raise RuntimeError("Fix PR URL is missing")
+    db = await get_db()
+    task = await get_task(db, task_id)
+    diag = json_loads((task or {}).get("diagnosis_json"))
+    github = GitHubClient()
+    try:
+        owner, repo, number = parsed
+        info = await github.get_pr_info(owner, repo, number)
+        diff = await github.get_pr_diff(owner, repo, number)
+        gate = await validate(
+            {
+                "owner": owner,
+                "repo": repo,
+                "pr_number": number,
+                "head_sha": info["head_sha"],
+                "diff": diff,
+            },
+            diag,
+            github=github,
         )
-        await db.execute(
-            "UPDATE tasks SET cursor_agent_id = ? WHERE id = ?",
-            (result["agent_id"], self.task_id),
-        )
-        await db.commit()
-        await interaction.followup.send(
-            f"🔄 Re-launched agent `{result['agent_id']}` with model {result['model']}"
-        )
+    finally:
+        await github.close()
+    await db.execute(
+        "UPDATE tasks SET quality_gate_json = ? WHERE id = ?",
+        (json.dumps(gate), task_id),
+    )
+    await db.commit()
+    return gate
 
 
 def json_loads(raw) -> dict:
@@ -207,33 +338,3 @@ def json_loads(raw) -> dict:
         return {}
 
 
-async def _quality_warning(task_id: str, status: dict) -> str | None:
-    parsed = parse_pr_url(status.get("pr_url") or "")
-    if not parsed:
-        return None
-    try:
-        from typesafe_sdk import Noul
-
-        from app.services.jev_client import JevClient
-
-        db = await get_db()
-        task = await get_task(db, task_id)
-        diag = json_loads((task or {}).get("diagnosis_json"))
-        missing = (diag.get("intent_alignment") or {}).get("missing") or []
-        diff = await GitHubClient().get_pr_diff(*parsed)
-        answers = await JevClient().evaluate(
-            state={"fix_diff": diff[:4000], "original_missing": missing},
-            questions={
-                "addresses_all_requirements": Noul(
-                    instructions="The fix diff addresses all the originally missing requirements"
-                ),
-                "introduces_new_issues": Noul(
-                    instructions="The fix introduces obvious new bugs or breaks existing functionality"
-                ),
-            },
-        )
-        if answers["addresses_all_requirements"].noul < 0.5 or answers["introduces_new_issues"].noul > 0.5:
-            return "Jev is not confident this diff covers the missing requirements. Read it before merging."
-    except Exception:
-        logger.warning("jev quality check skipped", exc_info=True)
-    return None

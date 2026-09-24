@@ -6,6 +6,8 @@ from app.config import settings
 
 
 class LLMClient:
+    total_tokens = 0
+
     def __init__(self):
         self.client = AsyncOpenAI(
             api_key=settings.DEEPSEEK_API_KEY or "unused",
@@ -24,4 +26,7 @@ class LLMClient:
             max_tokens=self.max_tokens,
             temperature=self.temperature,
         )
+        usage = getattr(response, "usage", None)
+        if usage is not None:
+            LLMClient.total_tokens += int(getattr(usage, "total_tokens", 0) or 0)
         return response.choices[0].message.content or ""
