@@ -54,3 +54,6 @@ python tests/test_jev_triage.py
 ```
 
 Next: agent DIAGNOSE → TRIAGE → DISPATCH wired to Jev (M-07..M-09).
+
+<!-- ci smoke -->
+
