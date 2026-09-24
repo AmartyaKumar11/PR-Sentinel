@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import re
 
@@ -83,6 +84,8 @@ class GitHubClient:
             "head_sha": (pr.get("head") or {}).get("sha", ""),
             "branch": (pr.get("head") or {}).get("ref", ""),
             "state": pr.get("state", ""),
+            "draft": bool(pr.get("draft")),
+            "node_id": pr.get("node_id") or "",
         }
 
     async def get_linked_issue(self, owner: str, repo: str, pr_number: int) -> dict | None:
@@ -174,21 +177,47 @@ class GitHubClient:
         return await self.get_file_tree(self.owner, self.repo, ref, path_filter)
 
     async def merge_pr(self, owner: str, repo: str, pr_number: int, merge_method: str = "squash") -> dict:
-        path = f"/repos/{owner}/{repo}/pulls/{pr_number}/merge"
-        body = {"merge_method": merge_method}
-        r = await self._client.put(path, json=body)
-        # Cursor opens the fix as a draft. GitHub returns 405 until it is marked ready.
-        if r.status_code == 405 and "draft" in r.text.lower():
-            ready = await self._client.patch(
-                f"/repos/{owner}/{repo}/pulls/{pr_number}",
-                json={"draft": False},
-            )
-            if ready.status_code < 400:
-                r = await self._client.put(path, json=body)
+        r = await self._client.put(
+            f"/repos/{owner}/{repo}/pulls/{pr_number}/merge",
+            json={"merge_method": merge_method},
+        )
         if r.status_code >= 400:
             return {"merged": False, "message": r.text[:300]}
         data = r.json()
         return {"merged": bool(data.get("merged")), "message": data.get("message", "")}
+
+    async def _mark_ready(self, node_id: str) -> dict | None:
+        # REST cannot clear draft. GraphQL markPullRequestReadyForReview can.
+        query = """
+        mutation($prId: ID!) {
+            markPullRequestReadyForReview(input: {pullRequestId: $prId}) {
+                pullRequest { id isDraft }
+            }
+        }
+        """
+        response = await self._client.post(
+            "/graphql",
+            json={"query": query, "variables": {"prId": node_id}},
+        )
+        if response.status_code >= 400:
+            return {"merged": False, "message": response.text[:300]}
+        errors = (response.json() or {}).get("errors") or []
+        if errors:
+            return {"merged": False, "message": errors[0].get("message", "Could not mark the pull request ready")}
+        return None
+
+    async def merge_pr_safe(self, owner: str, repo: str, pr_number: int, merge_method: str = "squash") -> dict:
+        """Mark ready if the pull request is a draft, then merge."""
+        info = await self.get_pr_info(owner, repo, pr_number)
+        if info.get("draft"):
+            node_id = info.get("node_id")
+            if not node_id:
+                return {"merged": False, "message": "Pull request is a draft and has no node_id"}
+            failed = await self._mark_ready(node_id)
+            if failed:
+                return failed
+            await asyncio.sleep(2)
+        return await self.merge_pr(owner, repo, pr_number, merge_method)
 
     async def close_pr(self, owner: str, repo: str, pr_number: int) -> dict:
         r = await self._client.patch(

@@ -388,7 +388,7 @@ async def _merge_pr(interaction: discord.Interaction, pr_url: str | None) -> Non
         await interaction.followup.send("No PR URL available.", ephemeral=True)
         return
     owner, repo, pr_num = parsed
-    result = await GitHubClient().merge_pr(owner, repo, pr_num)
+    result = await GitHubClient().merge_pr_safe(owner, repo, pr_num)
     if result.get("merged"):
         await interaction.followup.send(f"✅ PR #{pr_num} merged!")
     else:

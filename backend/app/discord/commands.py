@@ -165,7 +165,9 @@ async def setup_commands(bot):
             if not match:
                 await interaction.followup.send("No PR to merge yet.")
                 return
-            merge_result = await GitHubClient().merge_pr(match.group(1), match.group(2), int(match.group(3)))
+            merge_result = await GitHubClient().merge_pr_safe(
+                match.group(1), match.group(2), int(match.group(3))
+            )
             if merge_result.get("merged"):
                 await interaction.followup.send("✅ Merged! The VERIFY phase will run automatically.")
             else:

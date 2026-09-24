@@ -456,7 +456,9 @@ async def execute(action: dict, channel=None) -> str:
         return await _stop(task)
     if name == "merge_pr":
         owner, repo, number = _target(params, task)
-        result = await GitHubClient().merge_pr(owner, repo, number, params.get("method") or "squash")
+        result = await GitHubClient().merge_pr_safe(
+            owner, repo, number, params.get("method") or "squash"
+        )
         if result.get("merged"):
             return f"Merged PR #{number}."
         return f"Merge failed: {result.get('message')}"

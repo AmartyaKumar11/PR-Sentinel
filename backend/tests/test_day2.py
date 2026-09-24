@@ -337,26 +337,31 @@ async def test_github_client_four_methods_mocked():
     await gh.close()
 
 
-async def test_merge_pr_marks_draft_ready():
-    puts = {"n": 0}
+async def test_merge_pr_safe_marks_draft_ready(monkeypatch):
+    seen = []
+
+    async def _no_sleep(_seconds):
+        return None
+
+    monkeypatch.setattr("app.services.github_client.asyncio.sleep", _no_sleep)
 
     def handler(request: httpx.Request) -> Response:
+        seen.append(request.method + " " + request.url.path)
+        if request.url.path.endswith("/pulls/24") and request.method == "GET":
+            return Response(200, json={"draft": True, "node_id": "PR_kwDO", "title": "t", "body": "", "head": {}, "state": "open"})
+        if request.url.path == "/graphql":
+            return Response(200, json={"data": {"markPullRequestReadyForReview": {"pullRequest": {"isDraft": False}}}})
         if request.method == "PUT":
-            puts["n"] += 1
-            if puts["n"] == 1:
-                return Response(405, text='{"message":"Pull Request is still a draft","status":"405"}')
             return Response(200, json={"merged": True, "message": "merged"})
-        if request.method == "PATCH":
-            return Response(200, json={"draft": False})
         return Response(404)
 
     gh = GitHubClient(token="fake", owner="o", repo="r")
     await gh._client.aclose()
     gh._client = httpx.AsyncClient(base_url="https://api.github.com", transport=MockTransport(handler))
-    result = await gh.merge_pr("o", "r", 20)
+    result = await gh.merge_pr_safe("o", "r", 24)
     await gh.close()
     assert result["merged"] is True
-    assert puts["n"] == 2
+    assert "POST /graphql" in seen
 
 
 if __name__ == "__main__":
