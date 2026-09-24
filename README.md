@@ -31,12 +31,15 @@ python tests/test_analysis.py
 
 ## Status
 
+Dual-model: **DeepSeek** (ReAct / narrative) + **Jev** (classification / confidence). See `JEV-INTEGRATION-UPDATE.md`.
+
 Shipped so far:
 
 - M-01 health
 - M-02 webhook HMAC + filter (agent stub) — acceptance tested
 - M-03 GitHub client + tool registry — mocked + live README fetch
 - M-04 / M-05 / M-06 dep graph, diff parser, blast radius
+- Jev client + triage/verify assembly helpers + DB confidence columns
 - Task / review / SSE routes (empty until agent persists tasks)
 
 ```powershell
@@ -44,6 +47,7 @@ cd backend
 $env:PYTHONPATH = (Get-Location).Path
 python tests/test_analysis.py
 python tests/test_day2.py
+python tests/test_jev_triage.py
 ```
 
-Next: agent DIAGNOSE → TRIAGE → DISPATCH (M-07..M-09).
+Next: agent DIAGNOSE → TRIAGE → DISPATCH wired to Jev (M-07..M-09).

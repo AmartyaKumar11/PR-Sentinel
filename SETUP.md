@@ -77,6 +77,7 @@ openai>=1.50.0
 sse-starlette>=2.0.0
 python-dotenv>=1.0.0
 aiosqlite>=0.20.0
+typesafe-sdk>=0.1.0
 ```
 
 ```bash
@@ -99,6 +100,10 @@ LLM_MODEL=deepseek-v4-flash
 LLM_MAX_TOKENS=4096
 LLM_TEMPERATURE=0.1
 
+# ─── Jev (TypeSafe AI) ───
+TYPESAFE_API_KEY=sk-xxxx
+JEV_MODEL=jev-1.13.0
+
 # ─── App ───
 APP_PORT=8000
 FRONTEND_URL=http://localhost:5173
@@ -106,7 +111,6 @@ ALLOWED_ORIGINS=http://localhost:5173,http://localhost:3000
 DATABASE_PATH=./sentinel.db
 LOG_LEVEL=debug
 ```
-
 ### 2.4 GitHub Fine-Grained PAT
 
 Create at: `GitHub → Settings → Developer settings → Fine-grained tokens`

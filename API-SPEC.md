@@ -256,6 +256,18 @@ Full review detail with trace, blast radius graph, and intent report.
     { "step_number": 0, "phase": "diagnose", "type": "thought", "content": "...", "elapsed_ms": 120 },
     { "step_number": 1, "phase": "diagnose", "type": "action", "tool_name": "fetch_pr_diff", "content": "..." }
   ],
+  "jev_confidences": {
+    "severity": 0.92,
+    "action": 0.88,
+    "is_trivial": 0.03,
+    "touches_auth": 0.95,
+    "risk_level": 2.1
+  },
+  "requirement_scores": {
+    "Validate email format": 0.12,
+    "Send reset email": 0.94,
+    "Expire token after 1 hour": 0.08
+  },
   "created_at": "2026-08-20T14:30:00Z",
   "resolved_at": "2026-08-20T15:12:00Z"
 }

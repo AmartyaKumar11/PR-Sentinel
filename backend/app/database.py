@@ -33,7 +33,9 @@ CREATE TABLE IF NOT EXISTS tasks (
     resolved_at         TEXT,
     resolved_sha        TEXT,
     verification_json   TEXT,
-    is_verified         INTEGER DEFAULT 0
+    is_verified         INTEGER DEFAULT 0,
+    jev_confidences     TEXT,
+    requirement_scores  TEXT
 );
 
 CREATE TABLE IF NOT EXISTS trace_steps (
@@ -80,7 +82,20 @@ async def get_db() -> aiosqlite.Connection:
 
 async def _init_schema(db: aiosqlite.Connection) -> None:
     await db.executescript(_SCHEMA)
+    await _migrate_columns(db)
     await db.commit()
+
+
+async def _migrate_columns(db: aiosqlite.Connection) -> None:
+    """Add columns introduced after v1 without wiping existing DBs."""
+    cur = await db.execute("PRAGMA table_info(tasks)")
+    existing = {row[1] for row in await cur.fetchall()}
+    for col, decl in (
+        ("jev_confidences", "TEXT"),
+        ("requirement_scores", "TEXT"),
+    ):
+        if col not in existing:
+            await db.execute(f"ALTER TABLE tasks ADD COLUMN {col} {decl}")
 
 
 async def close_db() -> None:

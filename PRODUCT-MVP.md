@@ -85,6 +85,15 @@ If ANY of these are missing, the project doesn't demonstrate its thesis.
   - `scope_creep`: []
   - `risk_score`: ≥ 0.5 (auth.py touches users, orders, admin downstream)
 - **Expected triage:** severity=CRITICAL, action=dispatch_urgent
+- **Expected Jev output:**
+  - severity: CRITICAL (confidence: ~0.89)
+  - action: dispatch_urgent (confidence: ~0.91)
+  - touches_auth: ~0.95
+  - Requirement scores:
+    - "Validate email format": ~0.1 (NOT addressed)
+    - "Send reset email": ~0.9 (addressed)
+    - "Expire token after 1 hour": ~0.1 (NOT addressed)
+  - risk_level: ~2.5/3 (high)
 
 ### Scenario 2: Scope Creep
 - **Branch:** `fix/2-order-validation`

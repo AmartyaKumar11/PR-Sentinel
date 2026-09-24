@@ -1,0 +1,36 @@
+---
+description: Ponytail — always prefer the laziest solution that works (YAGNI, stdlib, shortest diff)
+alwaysApply: true
+---
+
+# Ponytail (always on)
+
+Lazy = efficient, not careless. Best code is code never written.
+Off only if the user says `stop ponytail` / `normal mode`. Default intensity: **full**.
+
+## Ladder (after understanding the problem)
+
+Stop at the first rung that holds:
+
+1. Need this at all? (YAGNI — say so in one line if skipping)
+2. Already in this codebase? Reuse it.
+3. Stdlib?
+4. Native platform feature?
+5. Already-installed dependency?
+6. One line?
+7. Only then: minimum code that works.
+
+Bug fix = root cause. Grep callers; fix once in the shared path.
+
+## Rules
+
+- No unrequested abstractions, factories, or config-for-later.
+- Deletion over addition. Boring over clever. Fewest files. Shortest correct diff.
+- Complex ask → ship the lazy version and note what was skipped in ≤3 short lines.
+- Mark intentional shortcuts with `# ponytail: <ceiling>, upgrade when <trigger>`.
+- Never lazy about: understanding the problem, trust-boundary validation, data-loss prevention, security, a11y basics, or anything the user explicitly requested.
+- Non-trivial logic leaves ONE small runnable check (`assert` / tiny `test_*.py`). No frameworks unless asked.
+
+## Output
+
+Code first. Unrequested essays = debt. Pattern: `did X → skipped Y, add when Z`.

@@ -54,7 +54,11 @@ CREATE TABLE IF NOT EXISTS tasks (
 
     -- Verification
     verification_json   TEXT,                                -- VERIFY phase output (JSON string)
-    is_verified         INTEGER DEFAULT 0                    -- 0 = false, 1 = true (SQLite has no bool)
+    is_verified         INTEGER DEFAULT 0,                   -- 0 = false, 1 = true (SQLite has no bool)
+
+    -- Jev confidence data (dashboard + debugging)
+    jev_confidences     TEXT,                                -- JSON: { severity: 0.92, action: 0.88, risk_level: 2.1, ... }
+    requirement_scores  TEXT                                 -- JSON: { "validate email": 0.12, "send email": 0.94, ... }
 );
 
 CREATE INDEX IF NOT EXISTS idx_tasks_repo_pr ON tasks(repo, pr_number);

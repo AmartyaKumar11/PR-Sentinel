@@ -6,13 +6,19 @@
 
 ## Architecture Overview
 
-One agent. Four sequential phases. One LLM (DeepSeek V4 Flash, non-reasoning mode).
+One agent. Four sequential phases. **Two models:** DeepSeek V4 Flash (reasoning / ReAct / narrative) + Jev / TypeSafe AI (classification / confidence decisions). DeepSeek stays in non-reasoning mode.
 
 ```
-Webhook → DIAGNOSE (3-5 LLM calls) → TRIAGE (1 LLM call) → DISPATCH (0 LLM calls) → done
+Webhook → DIAGNOSE (Jev fast-exit + 3-5 DeepSeek LLM calls)
+       → TRIAGE (1 Jev call + 1 short DeepSeek narrative) → DISPATCH (0 LLM) → done
                                                                                         │
-Follow-up push webhook ─────────────────────────────────────────────── VERIFY (1-2 LLM calls)
+Follow-up push webhook ──────────────── VERIFY (1 Jev call; optional DeepSeek comment)
 ```
+
+| Model | Role | Does | Does NOT |
+|---|---|---|---|
+| DeepSeek V4 Flash | Reasoning | ReAct loop, diffs/issues in NL, Composer narrative | Classification, severity routing, yes/no |
+| Jev (TypeSafe AI) | Decisions | Severity, intent per-requirement, trivial/phantom checks, verify | Text generation, tool calling |
 
 ---
 
@@ -45,6 +51,31 @@ class LLMClient:
 ```
 
 **Critical:** Do NOT enable `reasoning_effort` or any thinking mode parameter. Non-reasoning mode only. The ReAct loop externalizes reasoning — enabling thinking mode would double-bill reasoning tokens as output.
+
+---
+
+## Jev Client Implementation
+
+```python
+# backend/app/services/jev_client.py
+
+from typesafe_sdk import AsyncTypeSafeClient, Choice, Score, Noul
+from app.config import settings
+
+class JevClient:
+    def __init__(self):
+        self.client = AsyncTypeSafeClient(
+            api_key=settings.TYPESAFE_API_KEY or None,
+            model=settings.JEV_MODEL,  # "jev-1.13.0"
+        )
+
+    async def evaluate(self, state: dict, questions: dict) -> dict:
+        """Single parallel pass — all questions answered at once."""
+        response = await self.client.system_one(state=state, questions=questions)
+        return response.answers
+```
+
+Pin `JEV_MODEL` — `jev-latest` can shift under you. `TYPESAFE_API_KEY` is read from env (also auto-detected by the SDK).
 
 ---
 
@@ -245,7 +276,7 @@ ANSWER JSON SCHEMA:
     "missing": ["requirements from issue that are NOT implemented"],
     "scope_creep": ["changes in diff NOT mentioned in the issue"]
   }},
-  "blast_radius": {{
+    "blast_radius": {{
     "directly_changed": ["identifier"],
     "depth_1_impacted": ["identifier"],
     "depth_2_impacted": ["identifier"],
@@ -253,6 +284,7 @@ ANSWER JSON SCHEMA:
     "risk_score": float,
     "untested_impacted": ["identifier"]
   }},
+  "diff_summary": "string — truncated diff for Jev triage state",
   "is_trivial": bool
 }}
 
@@ -263,7 +295,218 @@ EDGE CASES:
 """
 ```
 
-### TRIAGE_PROMPT
+### DIAGNOSE — Jev fast-exit (after `fetch_pr_diff`)
+
+After the first tool call (`fetch_pr_diff`), BEFORE `fetch_linked_issue`, run a Jev check. If trivial, skip the rest of DIAGNOSE.
+
+```python
+# After fetching the diff, BEFORE calling fetch_linked_issue:
+trivial_check = await jev.evaluate(
+    state={"diff": diff_content},
+    questions={
+        "is_trivial": Noul(
+            instructions="This diff only modifies non-code files like README, .md, .yml, .json, images, or configuration"
+        ),
+        "touches_functions": Noul(
+            instructions="This diff adds, modifies, or deletes function or class definitions"
+        ),
+    },
+)
+
+if trivial_check["is_trivial"].noul > 0.9:
+    # Skip the rest of DIAGNOSE — go straight to TRIAGE with is_trivial=true
+    return {
+        "is_trivial": True,
+        "changed_files": extract_changed_files(diff_content),
+        "changed_identifiers": [],
+        "linked_issue": None,
+        "is_phantom_pr": False,
+        "is_underspecified_issue": False,
+        "diff_summary": diff_content[:2000],
+        "intent_alignment": {"addressed": [], "missing": [], "scope_creep": []},
+        "blast_radius": {
+            "directly_changed": [], "depth_1_impacted": [], "depth_2_impacted": [],
+            "highest_risk_path": "", "risk_score": 0.0, "untested_impacted": [],
+        },
+    }
+
+# If touches_functions.noul < 0.2 → skip build_dependency_graph entirely later
+skip_dep_graph = trivial_check["touches_functions"].noul < 0.2
+```
+
+Also include `diff_summary` (truncated diff) in the full DIAGNOSE Answer JSON so TRIAGE Jev has state.
+
+### TRIAGE (Jev — 1 call, 0 classification LLM calls)
+
+```
+═══════════════════════════════════════════════════════════════════
+PHASE 2: TRIAGE (Jev — 1 call, 0 LLM classification calls)
+═══════════════════════════════════════════════════════════════════
+
+Trigger:     DIAGNOSE phase completes with diagnosis data
+Model:       Jev (NOT DeepSeek) for classification; DeepSeek only for narrative
+LLM calls:   1 short narrative call (suggested_fix + file priority)
+Jev calls:   1 (all questions parallel, 70-500ms)
+```
+
+**Legacy `TRIAGE_PROMPT` (DeepSeek-only classification) is retained below for reference / offline fallback only. Prefer Jev.**
+
+```python
+# ─── Preferred path: Jev triage ───
+from typesafe_sdk import Choice, Score, Noul
+
+requirement_questions = {}
+if diagnosis.get("linked_issue") and diagnosis["linked_issue"].get("requirements"):
+    for i, req in enumerate(diagnosis["linked_issue"]["requirements"]):
+        requirement_questions[f"req_{i}_addressed"] = Noul(
+            instructions=f"The PR diff implements this requirement: '{req}'"
+        )
+
+scope_questions = {}
+for i, file in enumerate(diagnosis["changed_files"]):
+    scope_questions[f"scope_{i}_in_issue"] = Noul(
+        instructions=f"The issue mentions or implies changes to '{file}'"
+    )
+
+answers = await jev.evaluate(
+    state={
+        "diff_summary": diagnosis.get("diff_summary", ""),
+        "issue_title": (diagnosis.get("linked_issue") or {}).get("title", ""),
+        "issue_body": (diagnosis.get("linked_issue") or {}).get("body", ""),
+        "changed_files": diagnosis["changed_files"],
+        "blast_radius": {
+            "impacted_count": len(diagnosis["blast_radius"].get("depth_1_impacted", [])) +
+                              len(diagnosis["blast_radius"].get("depth_2_impacted", [])),
+            "untested_count": len(diagnosis["blast_radius"].get("untested_impacted", [])),
+            "highest_risk_path": diagnosis["blast_radius"].get("highest_risk_path", ""),
+        },
+    },
+    questions={
+        "severity": Choice(
+            instructions="Overall severity of this PR review",
+            criteria={
+                "TRIVIAL": "Only docs, config, or cosmetic changes with no functional impact",
+                "LOW": "Small functional change, tests exist, no missing requirements",
+                "MEDIUM": "Has missing requirements or scope creep but moderate blast radius",
+                "HIGH": "Missing requirements with significant blast radius or risk",
+                "CRITICAL": "Missing requirements in auth/security code with high blast radius",
+            },
+        ),
+        "action": Choice(
+            instructions="What action PR Sentinel should take",
+            criteria={
+                "skip": "Trivial PR, no review needed",
+                "comment_only": "Post a review comment but don't create a task",
+                "dispatch": "Create a task and deliver to the developer's IDE",
+                "dispatch_urgent": "Create an urgent task + GitHub issue for Background Agent",
+            },
+        ),
+        "is_trivial": Noul(
+            instructions="The PR only modifies non-code files like README, docs, config, or images"
+        ),
+        "is_phantom_pr": Noul(
+            instructions="No GitHub issue is linked to this PR"
+        ),
+        "is_underspecified_issue": Noul(
+            instructions="The linked issue is too vague to extract testable requirements from"
+        ),
+        "touches_auth_security": Noul(
+            instructions="The changed files include authentication, authorization, or security-related code"
+        ),
+        "risk_level": Score(
+            instructions="How risky is this change based on the blast radius data",
+            criteria=[
+                "Minimal risk — few or no downstream dependents, all tested",
+                "Moderate risk — some downstream dependents, mostly tested",
+                "High risk — many downstream dependents or untested impacted code",
+                "Critical risk — deep impact chain through core modules with untested code",
+            ],
+        ),
+        **requirement_questions,
+        **scope_questions,
+    },
+)
+
+severity = answers["severity"].choice
+action = answers["action"].choice
+
+if severity == "TRIVIAL" and answers["is_trivial"].noul < 0.7:
+    severity = "LOW"
+    action = "comment_only"
+
+req_keys = list(requirement_questions.keys())
+missing_reqs = [
+    diagnosis["linked_issue"]["requirements"][i]
+    for i, key in enumerate(req_keys)
+    if answers[key].noul < 0.4
+] if diagnosis.get("linked_issue") else []
+
+if answers["touches_auth_security"].noul > 0.7 and len(missing_reqs) > 0:
+    severity = "CRITICAL"
+    action = "dispatch_urgent"
+
+scope_creep = [
+    diagnosis["changed_files"][i]
+    for i, key in enumerate(scope_questions)
+    if answers[key].noul < 0.3
+]
+
+addressed_reqs = [
+    diagnosis["linked_issue"]["requirements"][i]
+    for i, key in enumerate(req_keys)
+    if answers[key].noul > 0.6
+] if diagnosis.get("linked_issue") else []
+
+triage_result = {
+    "severity": severity,
+    "action": action,
+    "justification": (
+        f"Jev confidence: severity={answers['severity'].confidence:.2f}, "
+        f"risk_level={answers['risk_level'].score:.1f}/3, "
+        f"{len(missing_reqs)} missing reqs, {len(scope_creep)} scope creep files."
+    ),
+    "intent_alignment": {
+        "addressed": addressed_reqs,
+        "missing": missing_reqs,
+        "scope_creep": scope_creep,
+        "requirement_confidences": {
+            diagnosis["linked_issue"]["requirements"][i]: round(answers[key].noul, 3)
+            for i, key in enumerate(req_keys)
+        } if diagnosis.get("linked_issue") else {},
+    },
+    "confidence_scores": {
+        "severity": round(answers["severity"].confidence, 3),
+        "action": round(answers["action"].confidence, 3),
+        "is_trivial": round(answers["is_trivial"].noul, 3),
+        "touches_auth": round(answers["touches_auth_security"].noul, 3),
+        "risk_level": round(answers["risk_level"].score, 3),
+    },
+    "suggested_fix_approach": "",
+    "affected_files_priority": [],
+}
+
+# DeepSeek generates ONLY narrative parts Jev can't:
+fix_prompt = f"""Given this diagnosis, write TWO things:
+1. A 2-3 sentence fix approach for the developer (what to do, not code)
+2. A priority-ordered list of affected files (most important first)
+
+Missing requirements: {missing_reqs}
+Scope creep: {scope_creep}
+Changed files: {diagnosis['changed_files']}
+Blast radius: {diagnosis['blast_radius'].get('highest_risk_path', '')}
+
+Respond as JSON: {{"suggested_fix_approach": "...", "affected_files_priority": [{{"path": "...", "lines": [], "change_type": "modified"}}]}}"""
+
+narrative = await deepseek.chat(
+    system="You are a code review assistant.",
+    messages=[{"role": "user", "content": fix_prompt}],
+)
+narrative_json = json.loads(parse_agent_output(narrative).content)
+triage_result["suggested_fix_approach"] = narrative_json["suggested_fix_approach"]
+triage_result["affected_files_priority"] = narrative_json["affected_files_priority"]
+```
+
+### TRIAGE_PROMPT (legacy DeepSeek fallback)
 
 ```python
 TRIAGE_PROMPT = """You are PR Sentinel's triage engine. Given a diagnosis JSON, classify the PR severity and decide what action to take.
@@ -309,7 +552,80 @@ DIAGNOSIS:
 """
 ```
 
-### VERIFY_PROMPT
+### VERIFY (Jev — 1 call, optional DeepSeek comment)
+
+```
+═══════════════════════════════════════════════════════════════════
+PHASE 4: VERIFY (Jev — 1 call, 1 optional DeepSeek call)
+═══════════════════════════════════════════════════════════════════
+
+Trigger:     Follow-up push on a PR with an existing task
+Model:       Jev (primary), DeepSeek (only if partially resolved)
+Jev calls:   1
+DeepSeek:    0 (if all resolved) or 1 (if partially resolved, for follow-up comment)
+```
+
+```python
+prev_missing = previous_diagnosis["intent_alignment"]["missing"]
+prev_scope = previous_diagnosis["intent_alignment"]["scope_creep"]
+
+verify_questions = {}
+for i, req in enumerate(prev_missing):
+    verify_questions[f"fixed_{i}"] = Noul(
+        instructions=f"The new diff now implements this requirement: '{req}'"
+    )
+for i, item in enumerate(prev_scope):
+    verify_questions[f"scope_resolved_{i}"] = Noul(
+        instructions=f"The scope creep in '{item}' has been reverted or is now justified by the issue"
+    )
+verify_questions["new_issues"] = Noul(
+    instructions="The new changes introduce problems that were not in the original diff"
+)
+
+answers = await jev.evaluate(
+    state={
+        "new_diff": new_diff_content,
+        "original_issue": previous_diagnosis.get("linked_issue", {}),
+        "previously_missing": prev_missing,
+        "previously_flagged_scope_creep": prev_scope,
+    },
+    questions=verify_questions,
+)
+
+resolved_items = [req for i, req in enumerate(prev_missing) if answers[f"fixed_{i}"].noul > 0.6]
+remaining_items = [req for i, req in enumerate(prev_missing) if answers[f"fixed_{i}"].noul <= 0.6]
+scope_resolved = [item for i, item in enumerate(prev_scope) if answers[f"scope_resolved_{i}"].noul > 0.6]
+all_resolved = len(remaining_items) == 0 and answers["new_issues"].noul < 0.3
+
+verification = {
+    "all_resolved": all_resolved,
+    "resolved_items": resolved_items,
+    "remaining_items": remaining_items,
+    "scope_resolved": scope_resolved,
+    "new_issues_detected": answers["new_issues"].noul > 0.5,
+    "confidence_per_requirement": {
+        prev_missing[i]: round(answers[f"fixed_{i}"].noul, 3)
+        for i in range(len(prev_missing))
+    },
+}
+
+if all_resolved:
+    await update_task_status(db, task_id, "resolved",
+                             resolved_sha=head_sha,
+                             verification_json=json.dumps(verification),
+                             is_verified=1)
+    await post_pr_review(pr_number, "PR Sentinel: All issues addressed.")
+else:
+    follow_up = await deepseek.chat(
+        system="You are PR Sentinel.",
+        messages=[{"role": "user", "content": f"Write a short PR comment: {len(remaining_items)} issues remain: {remaining_items}"}],
+    )
+    await update_task_status(db, task_id, "dispatched",
+                             verification_json=json.dumps(verification))
+    await post_pr_review(pr_number, follow_up)
+```
+
+### VERIFY_PROMPT (legacy DeepSeek fallback)
 
 ```python
 VERIFY_PROMPT = """You are PR Sentinel's verification engine. A previous diagnosis found issues with PR #{pr_number}. The developer has pushed new commits. Determine if the issues are resolved.

@@ -25,13 +25,15 @@ async def create_task(
 ) -> str:
     """task_id is passed in from the webhook handler — NOT generated here."""
     now = datetime.now(timezone.utc).isoformat()
+    confidences = triage.get("confidence_scores") or {}
+    req_scores = (triage.get("intent_alignment") or {}).get("requirement_confidences") or {}
     await db.execute(
         """
         INSERT INTO tasks (id, repo, pr_number, head_sha, severity, action,
                           diagnosis_json, triage_json, review_markdown, composer_prompt,
                           affected_files, blast_radius_json, suggested_fix,
-                          status, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+                          status, created_at, jev_confidences, requirement_scores)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)
         """,
         (
             task_id,
@@ -48,6 +50,8 @@ async def create_task(
             json.dumps(diagnosis.get("blast_radius", {})),
             triage.get("suggested_fix_approach", ""),
             now,
+            json.dumps(confidences),
+            json.dumps(req_scores),
         ),
     )
     await db.commit()
@@ -193,6 +197,8 @@ async def get_review_detail(db, task_id: str) -> dict | None:
         "blast_radius_json",
         "affected_files",
         "verification_json",
+        "jev_confidences",
+        "requirement_scores",
     ]:
         if task.get(field):
             try:

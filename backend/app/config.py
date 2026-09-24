@@ -21,6 +21,11 @@ class Settings(BaseSettings):
     LLM_MAX_TOKENS: int = 4096
     LLM_TEMPERATURE: float = 0.1
 
+    # Jev (TypeSafe AI) — TYPESAFE_API_KEY preferred; JEV_API_KEY accepted as alias
+    TYPESAFE_API_KEY: str = ""
+    JEV_API_KEY: str = ""
+    JEV_MODEL: str = "jev-1.13.0"
+
     APP_PORT: int = 8000
     FRONTEND_URL: str = "http://localhost:5173"
     ALLOWED_ORIGINS: str = "http://localhost:5173,http://localhost:3000"
@@ -30,6 +35,10 @@ class Settings(BaseSettings):
     @property
     def cors_origins(self) -> list[str]:
         return [o.strip() for o in self.ALLOWED_ORIGINS.split(",") if o.strip()]
+
+    @property
+    def typesafe_api_key(self) -> str:
+        return self.TYPESAFE_API_KEY or self.JEV_API_KEY
 
 
 settings = Settings()
