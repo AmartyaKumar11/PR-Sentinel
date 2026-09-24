@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -497,9 +498,9 @@ class AgentOrchestrator:
             except Exception:
                 logger.warning("auto-approve check failed", exc_info=True)
         if auto and triage.get("action") != "skip":
-            from app.services.cursor_client import CursorClient
+            from app.services.cursor_client import cursor
 
-            result = await CursorClient().launch_agent(
+            result = await cursor.launch_agent(
                 repo_full_name=f"{owner}/{repo}",
                 prompt=composer,
                 branch=f"pr-sentinel/fix-{pr_number}",
@@ -511,6 +512,11 @@ class AgentOrchestrator:
             )
             await db.commit()
             await update_task_status(db, task_id, "accepted")
+            from app.discord.bot import bot
+            from app.discord.views import monitor_agent
+
+            if bot.channel is not None:
+                asyncio.create_task(monitor_agent(result["agent_id"], bot.channel, task_id))
             return
         try:
             from app.discord.bot import bot

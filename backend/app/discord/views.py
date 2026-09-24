@@ -96,7 +96,7 @@ class ApprovalView(discord.ui.View):
                 f"**Repo:** {result['repo']}\n\n"
                 f"Use `/status` to check progress, `/stop` to cancel."
             )
-            asyncio.create_task(self._monitor_agent(result["agent_id"], interaction.channel))
+            asyncio.create_task(monitor_agent(result["agent_id"], interaction.channel, self.task_id))
 
         await _run_button(interaction, self, work)
 
@@ -131,32 +131,51 @@ class ApprovalView(discord.ui.View):
 
         await _run_button(interaction, self, work)
 
-    async def _monitor_agent(self, agent_id: str, channel):
-        from app.discord.bot import bot
+async def monitor_agent(agent_id: str, channel, task_id: str) -> None:
+    """Poll until the cloud agent finishes. A few failed checks do not end the watch."""
+    from app.discord.bot import bot
 
-        while True:
-            await asyncio.sleep(10)
-            try:
-                status = await cursor.get_run_status(agent_id)
-            except Exception:
-                logger.exception("cursor status failed agent=%s", agent_id)
+    failures = 0
+    max_failures = 10
+    while failures < max_failures:
+        await asyncio.sleep(15)
+        try:
+            status = await cursor.get_run_status(agent_id)
+            failures = 0
+        except Exception as exc:
+            failures += 1
+            logger.exception("cursor status failed agent=%s (%s/%s)", agent_id, failures, max_failures)
+            if failures >= max_failures:
+                await channel.send(
+                    f"⚠️ Lost contact with agent `{agent_id}` "
+                    f"after {max_failures} failed checks. "
+                    f"Last error: {exc}\n"
+                    f"Check cursor.com/agents for its status."
+                )
                 return
-            if status["status"] not in ("completed", "failed", "cancelled", "expired"):
-                continue
-            if status["status"] != "completed" or not status.get("pr_url"):
-                await bot.send_agent_complete(self.task_id, status)
+            continue
+        state = status.get("status")
+        if state == "completed":
+            if not status.get("pr_url"):
+                await bot.send_agent_complete(task_id, status)
                 return
             try:
-                gate = await _store_gate(self.task_id, status)
+                gate = await _store_gate(task_id, status)
             except Exception as exc:
-                logger.exception("quality gate failed task=%s", self.task_id)
+                logger.exception("quality gate failed task=%s", task_id)
                 gate = {
                     "passed": False,
                     "verdict": "failed",
                     "ci_status": "failed",
                     "summary": f"Quality gate failed: {exc}",
                 }
-            await bot.send_gate_result(self.task_id, status, gate)
+            await bot.send_gate_result(task_id, status, gate)
+            return
+        if state in ("failed", "cancelled", "expired"):
+            await channel.send(
+                f"⚠️ Agent `{agent_id}` {state}."
+                f"\n{status.get('result_text') or 'No details.'}"
+            )
             return
 
 
@@ -304,6 +323,7 @@ async def _relaunch(interaction: discord.Interaction, task_id: str) -> None:
     await interaction.followup.send(
         f"🔄 Re-launched agent `{result['agent_id']}` with model {model_label(result['model'])}"
     )
+    asyncio.create_task(monitor_agent(result["agent_id"], interaction.channel, task_id))
 
 
 async def _dismiss(interaction: discord.Interaction, task_id: str) -> None:

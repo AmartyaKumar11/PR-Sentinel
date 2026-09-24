@@ -186,7 +186,7 @@ async def _reply(bot, message, text: str) -> str:
         if decision is True:
             action = bot._pending_action
             bot._pending_action = None
-            return await _run(action)
+            return await _run(action, channel=message.channel)
         if decision is False:
             bot._pending_action = None
             return "Cancelled. Nothing was merged, stopped, or closed."
@@ -200,7 +200,7 @@ async def _reply(bot, message, text: str) -> str:
             if mapped in _FAST_CONFIRM:
                 bot._pending_action = action
                 return confirm_line(action, await _latest_task())
-            return await _run(action)
+            return await _run(action, channel=message.channel)
 
     context = await build_dynamic_context(message)
     try:
@@ -218,7 +218,7 @@ async def _reply(bot, message, text: str) -> str:
         action = None
     if not action:
         return prose or raw.strip()
-    result = await _run(action, prose)
+    result = await _run(action, prose, channel=message.channel)
     return result
 
 
@@ -234,9 +234,9 @@ async def _chat(context: str, text: str) -> str:
     )
 
 
-async def _run(action: dict, prose: str = "") -> str:
+async def _run(action: dict, prose: str = "", channel=None) -> str:
     try:
-        result = await execute(action)
+        result = await execute(action, channel=channel)
     except Exception as exc:
         logger.exception("discord action %s failed", action.get("action"))
         fail = f"⚠️ Action failed: {exc}"
@@ -429,7 +429,7 @@ def _target(params: dict, task: dict | None) -> tuple[str, str, int]:
     return owner, repo, int(params.get("pr_number") or task["pr_number"])
 
 
-async def execute(action: dict) -> str:
+async def execute(action: dict, channel=None) -> str:
     name = action.get("action") or ""
     params = action.get("params") or {}
     task = await _pick_task(params)
@@ -445,18 +445,15 @@ async def execute(action: dict) -> str:
         models = await cursor.list_models()
         return ", ".join(f"`{m}`" for m in models) or "No models returned."
     if name == "launch_agent":
-        return await _launch(task, params)
+        return await _launch(task, params, channel)
     if name == "relaunch_agent":
         if task and task.get("cursor_agent_id"):
             await cursor.cancel_agent(task["cursor_agent_id"])
-        return await _launch(task, params)
+        return await _launch(task, params, channel)
     if name == "resume_agent":
         return await _resume(task, params.get("message") or "")
     if name == "stop_agent":
-        if not task or not task.get("cursor_agent_id"):
-            return "No running agent to stop."
-        await cursor.cancel_agent(task["cursor_agent_id"])
-        return "Agent stopped."
+        return await _stop(task)
     if name == "merge_pr":
         owner, repo, number = _target(params, task)
         result = await GitHubClient().merge_pr(owner, repo, number, params.get("method") or "squash")
@@ -548,7 +545,27 @@ async def _status_text(task: dict | None) -> str:
     return line
 
 
-async def _launch(task: dict | None, params: dict) -> str:
+async def _stop(task: dict | None) -> str:
+    if not task or not task.get("cursor_agent_id"):
+        return "No running agent to stop."
+    agent_id = task["cursor_agent_id"]
+    usage = None
+    try:
+        usage = (await cursor.get_run_status(agent_id)).get("token_usage")
+    except Exception:
+        logger.warning("cursor status before stop failed", exc_info=True)
+    await cursor.cancel_agent(agent_id)
+    try:
+        await update_task_status(await get_db(), task["id"], "dismissed")
+    except ValueError:
+        pass
+    line = f"Stopped `{agent_id}`."
+    if usage:
+        line += f" Tokens {usage}."
+    return line
+
+
+async def _launch(task: dict | None, params: dict, channel=None) -> str:
     if not task:
         return "No task to launch against."
     prompt = params.get("prompt") or task.get("composer_prompt") or task.get("suggested_fix") or ""
@@ -568,6 +585,10 @@ async def _launch(task: dict | None, params: dict) -> str:
         await update_task_status(db, task["id"], "accepted")
     except ValueError:
         pass
+    if channel is not None:
+        from app.discord.views import monitor_agent
+
+        asyncio.create_task(monitor_agent(result["agent_id"], channel, task["id"]))
     return f"Launched `{result['agent_id']}` with {model_label(result['model'])}."
 
 

@@ -149,15 +149,94 @@ async def test_webhook_synchronize_reuses_task_id():
     assert r2.json()["task_id"] == task_id
 
 
-def test_auto_model_is_passed_to_create():
-    from app.services.cursor_client import agent_create_kwargs, model_label
+def test_launch_body_omits_auto_and_maps_status():
+    from app.services.cursor_client import launch_body, model_label, public_status
 
-    cloud = object()
-    assert agent_create_kwargs("auto", "k", cloud)["model"] == "auto"
-    assert agent_create_kwargs(None, "k", cloud)["model"] == "auto"
-    assert agent_create_kwargs("gpt-4o-mini", "k", cloud)["model"] == "gpt-4o-mini"
+    body = launch_body("o/r", "fix it", "auto", "pr-sentinel/fix-1")
+    assert "model" not in body
+    assert body["source"]["repository"] == "https://github.com/o/r"
+    assert body["target"]["branchName"] == "pr-sentinel/fix-1"
+    assert body["target"]["autoCreatePr"] is True
+    assert "[pr-sentinel]" in body["prompt"]["text"]
+    named = launch_body("o/r", "fix it", None, None)
+    assert "model" not in named
+    picked = launch_body("o/r", "fix it", "gpt-4o-mini", None)
+    assert picked["model"] == "gpt-4o-mini"
     assert model_label("auto") == "auto (Cursor picks)"
-    assert model_label("gpt-4o-mini") == "gpt-4o-mini"
+    assert public_status("FINISHED") == "completed"
+    assert public_status("ERROR") == "failed"
+
+
+def test_sentinel_pr_signals():
+    from app.routes.webhook import sentinel_pr
+
+    assert sentinel_pr({"head": {"ref": "pr-sentinel/fix-12"}, "body": "", "user": {"login": "me"}})
+    assert sentinel_pr({"head": {"ref": "feat"}, "body": "See [pr-sentinel]", "user": {}})
+    assert sentinel_pr({"head": {"ref": "feat"}, "body": "Opened by PR Sentinel", "user": {}})
+    assert sentinel_pr({"head": {"ref": "feat"}, "body": "", "user": {"login": "cursoragent"}})
+    assert not sentinel_pr(
+        {"head": {"ref": "feature/1-password-reset"}, "body": "Fixes #1", "user": {"login": "AmartyaKumar11"}}
+    )
+
+
+@pytest.mark.asyncio
+async def test_webhook_skips_sentinel_branch():
+    body = json.dumps(
+        {
+            "action": "opened",
+            "pull_request": {
+                "number": 12,
+                "body": "Closes #1",
+                "head": {"sha": "abc", "ref": "pr-sentinel/fix-11"},
+                "user": {"login": "AmartyaKumar11"},
+            },
+            "repository": {"full_name": "AmartyaKumar11/pr-sentinel-demo"},
+        }
+    ).encode()
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/api/webhook/github",
+            content=body,
+            headers={
+                "Content-Type": "application/json",
+                "X-GitHub-Event": "pull_request",
+                "X-Hub-Signature-256": _sign(body),
+            },
+        )
+    assert response.status_code == 200
+    assert response.json()["reason"] == "PR created by PR Sentinel"
+
+
+@pytest.mark.asyncio
+async def test_monitor_retries_then_reports_failure(monkeypatch):
+    from app.discord import views
+
+    async def _sleep(_seconds):
+        return None
+
+    calls = {"n": 0}
+
+    async def _status(_agent_id):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise RuntimeError("404")
+        return {"status": "failed", "result_text": "boom"}
+
+    monkeypatch.setattr(views.asyncio, "sleep", _sleep)
+    monkeypatch.setattr(views.cursor, "get_run_status", _status)
+
+    class Chan:
+        def __init__(self):
+            self.sent = []
+
+        async def send(self, text):
+            self.sent.append(text)
+
+    chan = Chan()
+    await views.monitor_agent("bc-test", chan, "task-1")
+    assert calls["n"] == 3
+    assert chan.sent == ["⚠️ Agent `bc-test` failed.\nboom"]
 
 
 def test_find_issue_from_body_and_branch():

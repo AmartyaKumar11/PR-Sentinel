@@ -41,6 +41,9 @@ async def github_webhook(request: Request):
         return {"skipped": True, "reason": f"Action: {action}"}
 
     pr = payload["pull_request"]
+    if sentinel_pr(pr):
+        return {"skipped": True, "reason": "PR created by PR Sentinel"}
+
     full = payload["repository"]["full_name"]
     owner, repo = full.split("/", 1)
     pr_number = pr["number"]
@@ -65,6 +68,18 @@ async def github_webhook(request: Request):
     await save_pending(db, meta)
     asyncio.create_task(_notify_pr(meta))
     return JSONResponse({"pending_id": meta["id"]}, status_code=202)
+
+
+def sentinel_pr(pr: dict) -> bool:
+    """Skip fix PRs this bot asked Cursor to open. The GitHub token owner is the human."""
+    branch = ((pr.get("head") or {}).get("ref") or "")
+    body = (pr.get("body") or "").lower()
+    author = ((pr.get("user") or {}).get("login") or "").lower()
+    if branch.startswith("pr-sentinel/"):
+        return True
+    if "[pr-sentinel]" in body or "pr sentinel" in body:
+        return True
+    return author == "cursoragent" or author.endswith("[bot]")
 
 
 def _pr_meta(payload: dict, full: str) -> dict:
