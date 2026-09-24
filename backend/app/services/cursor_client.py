@@ -31,11 +31,8 @@ def model_label(model: str | None) -> str:
 
 
 def agent_create_kwargs(model: str | None, api_key: str, cloud) -> dict:
-    """Omit model when it is auto so Agent.create does not get a guessed id."""
-    kwargs = {"api_key": api_key, "cloud": cloud}
-    if model and model != "auto":
-        kwargs["model"] = model
-    return kwargs
+    """The SDK requires a model. "auto" is Cursor's own default, not a guessed id."""
+    return {"api_key": api_key, "cloud": cloud, "model": model or "auto"}
 
 
 def _repo_url(full_name: str) -> str:

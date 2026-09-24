@@ -79,7 +79,7 @@ Model management:
       "opus" / "most capable" / "best" / "strongest" → "claude-opus-4-20250514"
       "4.1" / "gpt-4.1" → "gpt-4.1"
       "auto" / "default" / "let cursor decide" → "auto"
-    When the model is "auto", omit the model param entirely.
+    "auto" is a real model id. Pass it through; do not leave model empty.
     If the user asks what model is in use and the default is auto, say "auto (Cursor picks)".
     If ambiguous, ask which one.
   {"action": "list_models", "params": {}}

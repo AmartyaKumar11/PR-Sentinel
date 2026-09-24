@@ -149,11 +149,12 @@ async def test_webhook_synchronize_reuses_task_id():
     assert r2.json()["task_id"] == task_id
 
 
-def test_auto_model_omits_create_arg():
+def test_auto_model_is_passed_to_create():
     from app.services.cursor_client import agent_create_kwargs, model_label
 
     cloud = object()
-    assert "model" not in agent_create_kwargs("auto", "k", cloud)
+    assert agent_create_kwargs("auto", "k", cloud)["model"] == "auto"
+    assert agent_create_kwargs(None, "k", cloud)["model"] == "auto"
     assert agent_create_kwargs("gpt-4o-mini", "k", cloud)["model"] == "gpt-4o-mini"
     assert model_label("auto") == "auto (Cursor picks)"
     assert model_label("gpt-4o-mini") == "gpt-4o-mini"
