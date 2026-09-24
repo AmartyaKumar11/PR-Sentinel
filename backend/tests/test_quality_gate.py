@@ -45,7 +45,38 @@ deleted file mode 100644
 """
     bad = diff_sanity(deleted, _DIAG)
     assert bad["test_files_deleted"]
-    assert "tests/test_auth.py" in bad["files_outside_blast_radius"]
+    assert bad["files_outside_blast_radius"] == []
+
+
+def test_diff_sanity_allows_tests():
+    diff = """diff --git a/tests/test_auth.py b/tests/test_auth.py
+--- a/tests/test_auth.py
++++ b/tests/test_auth.py
+@@ -1 +1,2 @@
++def test_reset():
+     pass
+diff --git a/README.md b/README.md
+--- a/README.md
++++ b/README.md
+@@ -1 +1 @@
+-old
++note
+diff --git a/.cursor/rules.md b/.cursor/rules.md
+--- a/.cursor/rules.md
++++ b/.cursor/rules.md
+@@ -1 +1 @@
+-old
++rule
+diff --git a/src/billing.py b/src/billing.py
+--- a/src/billing.py
++++ b/src/billing.py
+@@ -1 +1,2 @@
++def bill():
+     pass
+"""
+    result = diff_sanity(diff, _DIAG)
+    assert result["files_outside_blast_radius"] == ["src/billing.py"]
+    assert not result["ok"]
     ci = """diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
 --- a/.github/workflows/ci.yml
 +++ b/.github/workflows/ci.yml

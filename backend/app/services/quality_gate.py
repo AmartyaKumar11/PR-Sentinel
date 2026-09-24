@@ -58,6 +58,17 @@ def _is_test(path: str) -> bool:
     return "/tests/" in f"/{name}" or base.startswith("test_") or base.endswith("_test.py")
 
 
+def _in_scope(path: str) -> bool:
+    """Tests and repo notes are expected even when the diagnosis never listed them."""
+    name = path.replace("\\", "/")
+    lower = name.lower()
+    if _is_test(name):
+        return True
+    if lower.startswith((".cursor/", ".github/")) or "/.cursor/" in f"/{lower}" or "/.github/" in f"/{lower}":
+        return True
+    return lower.rsplit("/", 1)[-1] == "readme.md"
+
+
 def _is_ci(path: str) -> bool:
     name = path.replace("\\", "/").lower()
     return any(name.startswith(p) or f"/{p}" in f"/{name}" for p in _CI_PREFIXES)
@@ -98,7 +109,7 @@ def diff_sanity(diff: str, diagnosis: dict) -> dict:
         if _is_ci(path):
             ci_touched = True
         # ponytail: no file list in the diagnosis means we cannot tell what is outside it
-        if allowed and path not in allowed:
+        if allowed and path not in allowed and not _in_scope(path):
             outside.append(path)
     ok = lines < 500 and not outside and not deleted_test and not ci_touched
     return {
