@@ -102,7 +102,9 @@ async def _run_button(interaction: discord.Interaction, work) -> None:
     """Defer, run the click, and always answer. A thrown launch must not stick on thinking."""
     if not await owner_only(interaction):
         return
-    await interaction.response.defer(thinking=True)
+    # thinking=True leaves an empty placeholder. Discord then shows
+    # "This interaction failed" even though followup.send already answered.
+    await interaction.response.defer()
     try:
         await work()
     except Exception as exc:
