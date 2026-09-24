@@ -45,6 +45,30 @@ def test_dep_graph_and_blast():
     assert len(br["depth_1_impacted"]) + len(br["depth_2_impacted"]) >= 1
 
 
+def test_bom_and_inner_import_blast():
+    auth = (
+        "\ufeffdef reset_password(email):\n"
+        "    token = generate_reset_token(email)\n"
+        "    from src.notifications import send_email\n"
+        "    send_email(email, 'Password Reset', token)\n"
+        "\n"
+        "def generate_reset_token(user_id):\n"
+        "    return user_id\n"
+    )
+    notes = "def send_email(to, subject, body):\n    return True\n"
+    from app.services.ast_parser import build_graph
+
+    graph = build_graph({"src/auth.py": auth, "src/notifications.py": notes})
+    ids = {n["id"] for n in graph["nodes"]}
+    assert "src.auth.reset_password" in ids
+    pairs = {(e["from"], e["to"]) for e in graph["edges"]}
+    assert ("src.auth.reset_password", "src.notifications.send_email") in pairs
+    br = trace_blast_radius(["src.auth.reset_password"], graph)
+    assert br["risk_score"] > 0
+    assert br["highest_risk_path"]
+    assert "src.notifications.send_email" in br["depth_1_impacted"]
+
+
 def test_diff_parser():
     diff = """diff --git a/src/auth.py b/src/auth.py
 --- a/src/auth.py
