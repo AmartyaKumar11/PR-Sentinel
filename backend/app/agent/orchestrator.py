@@ -52,6 +52,9 @@ class AgentOrchestrator:
         self.deepseek = deepseek or LLMClient()
         self.jev = jev or JevClient()
         self.sse = sse_manager
+        # ponytail: trace_steps FK requires the task row, which dispatch creates.
+        # Buffer per task_id until then. Upgrade when the webhook inserts the row first.
+        self._pending_traces: dict[str, list] = {}
 
     async def run(
         self,
@@ -85,7 +88,7 @@ class AgentOrchestrator:
                 await self._run_jev_verify(task_id, owner, repo, pr_number, head_sha)
         except Exception as e:
             logger.exception("agent failed task=%s", task_id)
-            self.sse.emit(
+            await self._emit_and_persist(
                 task_id,
                 {"step": 0, "phase": "diagnose", "type": "error", "content": str(e)},
             )
@@ -97,25 +100,36 @@ class AgentOrchestrator:
 
     async def _emit(self, task_id, step, phase, type_, content, **extra):
         event = {"step": step, "phase": phase, "type": type_, "content": content, **extra}
+        await self._emit_and_persist(task_id, event)
+
+    async def _emit_and_persist(self, task_id, event):
         self.sse.emit(task_id, event)
+        content = event.get("content", "")
+        if not isinstance(content, str):
+            content = json.dumps(content)
+        row = (
+            event.get("step", 0),
+            event.get("phase") or "diagnose",
+            event.get("type") or "thought",
+            content[:2000],
+            event.get("tool"),
+            event.get("args"),
+            event.get("elapsed_ms"),
+        )
         db = await get_db()
-        # only persist if task row exists (dispatch creates it) — skip early diagnose persist
-        # ponytail: write traces after task exists; for diagnose stash in memory via skip
-        try:
-            task = await get_task(db, task_id)
-            if task:
-                await save_trace_step(
-                    db,
-                    task_id,
-                    step,
-                    phase,
-                    type_,
-                    content if isinstance(content, str) else json.dumps(content)[:2000],
-                    tool_name=extra.get("tool"),
-                    tool_args=extra.get("args"),
-                )
-        except Exception:
-            pass
+        if await get_task(db, task_id):
+            await self._flush_traces(task_id)
+            await save_trace_step(db, task_id, *row)
+        else:
+            self._pending_traces.setdefault(task_id, []).append(row)
+
+    async def _flush_traces(self, task_id):
+        pending = self._pending_traces.pop(task_id, [])
+        if not pending:
+            return
+        db = await get_db()
+        for row in pending:
+            await save_trace_step(db, task_id, *row)
 
     async def _run_diagnose(self, task_id, owner, repo, pr_number, head_sha) -> dict:
         tools = build_tool_registry(owner, repo)
@@ -220,18 +234,30 @@ class AgentOrchestrator:
             },
             "blast_radius": blast,
         }
-        # DeepSeek fills intent when we have an issue (one short call)
+        # DeepSeek judges whether the diff implements each requirement.
         if issue and reqs:
+            step += 1
+            await self._emit(task_id, step, "diagnose", "thought", "DeepSeek intent alignment")
             try:
                 msg = await self.deepseek.chat(
-                    system="Return only Answer: JSON with addressed/missing/scope_creep string arrays.",
+                    system=(
+                        "You are analyzing a PR diff against issue requirements. "
+                        "For each requirement, determine if the diff ACTUALLY IMPLEMENTS it — "
+                        "not just mentions related words. A function that takes an email parameter "
+                        "does NOT implement email validation unless it contains validation logic "
+                        "(regex, format check, library call). A comment that only says validation is missing does not count. Be strict. "
+                        "Copy each requirement string exactly into addressed or missing. "
+                        "Return only JSON."
+                    ),
                     messages=[
                         {
                             "role": "user",
                             "content": (
-                                f"Requirements: {reqs}\nChanged files: {files}\n"
+                                "Requirements:\n"
+                                + "\n".join(f"- {r}" for r in reqs)
+                                + f"\nChanged files: {files}\n"
                                 f"Diff:\n{_truncate(raw_diff, 3000)}\n"
-                                'Answer: {"addressed":[],"missing":[],"scope_creep":[]}'
+                                'Return JSON: {"addressed":[],"missing":[],"scope_creep":[]}'
                             ),
                         }
                     ],
@@ -254,13 +280,19 @@ class AgentOrchestrator:
         return diagnosis
 
     async def _run_jev_triage(self, task_id, diagnosis) -> dict:
-        questions, req_q, scope_q = build_triage_questions(diagnosis)
+        questions = build_triage_questions(diagnosis)
         br = diagnosis.get("blast_radius") or {}
+        intent = diagnosis.get("intent_alignment") or {}
+        missing = intent.get("missing") or []
+        scope = intent.get("scope_creep") or []
         state = {
             "diff_summary": diagnosis.get("diff_summary", ""),
             "issue_title": (diagnosis.get("linked_issue") or {}).get("title", ""),
             "issue_body": (diagnosis.get("linked_issue") or {}).get("body", ""),
             "changed_files": diagnosis.get("changed_files") or [],
+            "missing_count": len(missing),
+            "has_scope_creep": len(scope) > 0,
+            "has_missing_requirements": len(missing) > 0,
             "blast_radius": {
                 "impacted_count": len(br.get("depth_1_impacted") or [])
                 + len(br.get("depth_2_impacted") or []),
@@ -269,17 +301,7 @@ class AgentOrchestrator:
             },
         }
         answers = await self.jev.evaluate(state=state, questions=questions)
-        triage = assemble_triage(diagnosis, answers, req_q, scope_q)
-        # Prefer Jev intent_alignment over diagnose stubs when scores exist
-        if triage.get("intent_alignment"):
-            diagnosis["intent_alignment"] = {
-                **diagnosis.get("intent_alignment", {}),
-                **{
-                    k: triage["intent_alignment"][k]
-                    for k in ("addressed", "missing", "scope_creep")
-                    if triage["intent_alignment"].get(k) is not None
-                },
-            }
+        triage = assemble_triage(diagnosis, answers)
 
         # Narrative via DeepSeek
         try:
@@ -310,7 +332,7 @@ class AgentOrchestrator:
                 for f in (diagnosis.get("changed_files") or [])[:5]
             ]
 
-        self.sse.emit(
+        await self._emit_and_persist(
             task_id,
             {
                 "step": 0,
@@ -349,6 +371,7 @@ class AgentOrchestrator:
             review_md,
             composer,
         )
+        await self._flush_traces(task_id)
 
         if triage.get("action") != "skip":
             tools = build_tool_registry(owner, repo)
@@ -366,7 +389,7 @@ class AgentOrchestrator:
             else:
                 await update_task_status(db, task_id, "dispatched")
 
-        self.sse.emit(
+        await self._emit_and_persist(
             task_id,
             {"step": 0, "phase": "dispatch", "type": "answer", "content": "Task dispatched."},
         )
@@ -423,7 +446,7 @@ class AgentOrchestrator:
                 pr_number=pr_number,
                 review_body=f"PR Sentinel: {n} issues remain.",
             )
-        self.sse.emit(
+        await self._emit_and_persist(
             task_id,
             {
                 "step": 0,

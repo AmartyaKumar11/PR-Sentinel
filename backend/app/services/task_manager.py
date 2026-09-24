@@ -26,7 +26,9 @@ async def create_task(
     """task_id is passed in from the webhook handler — NOT generated here."""
     now = datetime.now(timezone.utc).isoformat()
     confidences = triage.get("confidence_scores") or {}
-    req_scores = (triage.get("intent_alignment") or {}).get("requirement_confidences") or {}
+    # DeepSeek diagnose alignment, not Jev nouls.
+    diag = diagnosis if isinstance(diagnosis, dict) else {}
+    req_scores = diag.get("intent_alignment") or {}
     await db.execute(
         """
         INSERT INTO tasks (id, repo, pr_number, head_sha, severity, action,
@@ -184,7 +186,7 @@ async def get_review_detail(db, task_id: str) -> dict | None:
         SELECT step_number, phase, type, content, tool_name, tool_args, elapsed_ms, created_at
         FROM trace_steps
         WHERE task_id = ?
-        ORDER BY step_number
+        ORDER BY id
         """,
         (task_id,),
     )

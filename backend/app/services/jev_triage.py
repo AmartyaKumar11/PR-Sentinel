@@ -5,22 +5,9 @@ from __future__ import annotations
 from typesafe_sdk import Choice, Noul, Score
 
 
-def build_triage_questions(diagnosis: dict) -> tuple[dict, dict, dict]:
-    """Returns (questions, requirement_questions, scope_questions)."""
-    requirement_questions: dict = {}
-    linked = diagnosis.get("linked_issue") or {}
-    for i, req in enumerate(linked.get("requirements") or []):
-        requirement_questions[f"req_{i}_addressed"] = Noul(
-            instructions=f"The PR diff implements this requirement: '{req}'"
-        )
-
-    scope_questions: dict = {}
-    for i, file in enumerate(diagnosis.get("changed_files") or []):
-        scope_questions[f"scope_{i}_in_issue"] = Noul(
-            instructions=f"The issue mentions or implies changes to '{file}'"
-        )
-
-    questions = {
+def build_triage_questions(_diagnosis: dict | None = None) -> dict:
+    """Structural classification only. Requirements are judged by DeepSeek."""
+    return {
         "severity": Choice(
             instructions="Overall severity of this PR review",
             criteria={
@@ -59,13 +46,10 @@ def build_triage_questions(diagnosis: dict) -> tuple[dict, dict, dict]:
                 "Critical risk — deep impact chain through core modules with untested code",
             ],
         ),
-        **requirement_questions,
-        **scope_questions,
     }
-    return questions, requirement_questions, scope_questions
 
 
-def assemble_triage(diagnosis: dict, answers: dict, requirement_questions: dict, scope_questions: dict) -> dict:
+def assemble_triage(diagnosis: dict, answers: dict) -> dict:
     severity = answers["severity"].choice
     action = answers["action"].choice
 
@@ -73,16 +57,10 @@ def assemble_triage(diagnosis: dict, answers: dict, requirement_questions: dict,
         severity = "LOW"
         action = "comment_only"
 
-    linked = diagnosis.get("linked_issue") or {}
-    reqs = linked.get("requirements") or []
-    req_keys = list(requirement_questions.keys())
-
-    missing_reqs = [
-        reqs[i] for i, key in enumerate(req_keys) if answers[key].noul < 0.4
-    ]
-    addressed_reqs = [
-        reqs[i] for i, key in enumerate(req_keys) if answers[key].noul > 0.6
-    ]
+    intent = diagnosis.get("intent_alignment") or {}
+    missing_reqs = list(intent.get("missing") or [])
+    addressed_reqs = list(intent.get("addressed") or [])
+    scope_creep = list(intent.get("scope_creep") or [])
 
     if answers["touches_auth_security"].noul > 0.7 and missing_reqs:
         severity = "CRITICAL"
@@ -96,9 +74,6 @@ def assemble_triage(diagnosis: dict, answers: dict, requirement_questions: dict,
             action = "dispatch"
 
     files = diagnosis.get("changed_files") or []
-    scope_creep = [
-        files[i] for i, key in enumerate(scope_questions) if answers[key].noul < 0.3
-    ]
     if phantom and not scope_creep:
         scope_creep = list(files)
 
@@ -114,9 +89,6 @@ def assemble_triage(diagnosis: dict, answers: dict, requirement_questions: dict,
             "addressed": addressed_reqs,
             "missing": missing_reqs,
             "scope_creep": scope_creep,
-            "requirement_confidences": {
-                reqs[i]: round(answers[key].noul, 3) for i, key in enumerate(req_keys)
-            },
         },
         "confidence_scores": {
             "severity": round(answers["severity"].confidence, 3),

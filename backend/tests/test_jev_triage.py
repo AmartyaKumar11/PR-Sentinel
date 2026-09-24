@@ -28,9 +28,12 @@ def test_assemble_scenario1_critical():
             ]
         },
         "blast_radius": {"depth_1_impacted": ["a"], "depth_2_impacted": ["b"], "untested_impacted": []},
+        "intent_alignment": {
+            "addressed": ["Send reset email"],
+            "missing": ["Validate email format", "Expire token after 1 hour"],
+            "scope_creep": [],
+        },
     }
-    req_q = {f"req_{i}_addressed": None for i in range(3)}
-    scope_q = {"scope_0_in_issue": None}
     answers = {
         "severity": _choice("HIGH", 0.89),
         "action": _choice("dispatch_urgent", 0.91),
@@ -39,12 +42,8 @@ def test_assemble_scenario1_critical():
         "is_underspecified_issue": _noul(0.1),
         "touches_auth_security": _noul(0.95),
         "risk_level": _score(2.5),
-        "req_0_addressed": _noul(0.1),
-        "req_1_addressed": _noul(0.9),
-        "req_2_addressed": _noul(0.08),
-        "scope_0_in_issue": _noul(0.8),
     }
-    triage = assemble_triage(diagnosis, answers, req_q, scope_q)
+    triage = assemble_triage(diagnosis, answers)
     assert triage["severity"] == "CRITICAL"  # auth + missing overrides
     assert triage["action"] == "dispatch_urgent"
     assert "Validate email format" in triage["intent_alignment"]["missing"]
