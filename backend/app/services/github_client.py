@@ -163,6 +163,25 @@ class GitHubClient:
     async def list_files(self, ref: str, path_filter: str = "") -> list[str]:
         return await self.get_file_tree(self.owner, self.repo, ref, path_filter)
 
+    async def merge_pr(self, owner: str, repo: str, pr_number: int, merge_method: str = "squash") -> dict:
+        r = await self._client.put(
+            f"/repos/{owner}/{repo}/pulls/{pr_number}/merge",
+            json={"merge_method": merge_method},
+        )
+        if r.status_code >= 400:
+            return {"merged": False, "message": r.text[:300]}
+        data = r.json()
+        return {"merged": bool(data.get("merged")), "message": data.get("message", "")}
+
+    async def close_pr(self, owner: str, repo: str, pr_number: int) -> dict:
+        r = await self._client.patch(
+            f"/repos/{owner}/{repo}/pulls/{pr_number}",
+            json={"state": "closed"},
+        )
+        if r.status_code >= 400:
+            return {"closed": False, "message": r.text[:300]}
+        return {"closed": True, "message": ""}
+
     async def post_pr_review(self, pr_number: int, review_body: str) -> dict:
         result = await self.post_comment(self.owner, self.repo, pr_number, review_body)
         return {"comment_id": result.get("id"), "url": result.get("html_url")}

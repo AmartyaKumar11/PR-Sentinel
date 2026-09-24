@@ -9,6 +9,7 @@ import re
 from app.agent.composer_prompt import format_review_markdown, generate_composer_prompt
 from app.agent.parser import parse_agent_output
 from app.agent.tools.setup import build_tool_registry
+from app.config import settings
 from app.database import get_db
 from app.services.diff_parser import extract_changed_identifiers, is_trivial_diff
 from app.services.jev_client import JevClient
@@ -356,6 +357,12 @@ class AgentOrchestrator:
             }
 
         composer = generate_composer_prompt(diagnosis, triage)
+        try:
+            from app.services.prompt_crafter import craft_prompt
+
+            composer = await craft_prompt(diagnosis, triage, deepseek=self.deepseek)
+        except Exception:
+            logger.warning("prompt craft failed", exc_info=True)
         review_md = format_review_markdown(diagnosis, triage)
         db = await get_db()
         await create_task(
@@ -393,6 +400,7 @@ class AgentOrchestrator:
             task_id,
             {"step": 0, "phase": "dispatch", "type": "answer", "content": "Task dispatched."},
         )
+        await self._notify_discord(task_id, owner, repo, pr_number, diagnosis, triage, composer)
 
     async def _run_jev_verify(self, task_id, owner, repo, pr_number, head_sha):
         db = await get_db()
@@ -455,3 +463,70 @@ class AgentOrchestrator:
                 "content": json.dumps(verification),
             },
         )
+        try:
+            from app.discord.bot import bot
+
+            if bot.is_ready():
+                await bot.send_verification_result(task_id, verification)
+        except Exception:
+            logger.warning("discord verify notify failed", exc_info=True)
+
+    async def _notify_discord(self, task_id, owner, repo, pr_number, diagnosis, triage, composer):
+        auto = False
+        if settings.CURSOR_API_KEY:
+            try:
+                from typesafe_sdk import Noul
+
+                missing = (diagnosis.get("intent_alignment") or {}).get("missing") or []
+                answers = await self.jev.evaluate(
+                    state={
+                        "severity": triage.get("severity"),
+                        "risk_score": (diagnosis.get("blast_radius") or {}).get("risk_score", 0),
+                        "missing_count": len(missing),
+                    },
+                    questions={
+                        "auto_approvable": Noul(
+                            instructions=(
+                                "This fix is low-risk enough to auto-approve without human confirmation. "
+                                "Only true for LOW severity with risk_score under 0.2 and no missing requirements."
+                            )
+                        )
+                    },
+                )
+                auto = answers["auto_approvable"].noul > 0.85
+            except Exception:
+                logger.warning("auto-approve check failed", exc_info=True)
+        if auto and triage.get("action") != "skip":
+            from app.services.cursor_client import CursorClient
+
+            result = await CursorClient().launch_agent(
+                repo_full_name=f"{owner}/{repo}",
+                prompt=composer,
+                branch=f"pr-sentinel/fix-{pr_number}",
+            )
+            db = await get_db()
+            await db.execute(
+                "UPDATE tasks SET cursor_agent_id = ? WHERE id = ?",
+                (result["agent_id"], task_id),
+            )
+            await db.commit()
+            await update_task_status(db, task_id, "accepted")
+            return
+        try:
+            from app.discord.bot import bot
+
+            if not bot.is_ready():
+                return
+            await bot.send_task_notification(
+                {
+                    "id": task_id,
+                    "repo": f"{owner}/{repo}",
+                    "pr_number": pr_number,
+                    "severity": triage["severity"],
+                    "suggested_fix": triage.get("suggested_fix_approach", ""),
+                    "diagnosis_json": json.dumps(diagnosis),
+                    "jev_confidences": json.dumps(triage.get("confidence_scores") or {}),
+                }
+            )
+        except Exception:
+            logger.warning("discord notify failed", exc_info=True)

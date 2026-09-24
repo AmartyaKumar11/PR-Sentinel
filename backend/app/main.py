@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 
@@ -15,7 +16,18 @@ logging.basicConfig(level=settings.LOG_LEVEL.upper())
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await get_db()
+    bot_task = None
+    token = settings.DISCORD_BOT_TOKEN
+    if token and "your_discord" not in token:
+        from app.discord.bot import bot
+
+        bot_task = asyncio.create_task(bot.start(token))
     yield
+    if bot_task:
+        from app.discord.bot import bot
+
+        await bot.close()
+        bot_task.cancel()
     await close_db()
 
 

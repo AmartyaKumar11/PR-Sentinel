@@ -32,6 +32,13 @@ class Settings(BaseSettings):
     DATABASE_PATH: str = "./sentinel.db"
     LOG_LEVEL: str = "debug"
 
+    DISCORD_BOT_TOKEN: str = ""
+    DISCORD_CHANNEL_ID: str = ""
+    DISCORD_GUILD_ID: str = ""
+
+    CURSOR_API_KEY: str = ""
+    CURSOR_DEFAULT_MODEL: str = "claude-sonnet-4-20250514"
+
     @property
     def cors_origins(self) -> list[str]:
         return [o.strip() for o in self.ALLOWED_ORIGINS.split(",") if o.strip()]

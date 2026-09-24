@@ -39,4 +39,4 @@ Format: **Decision** · **Why** · **Advantage** · **Expected** · **Actual**
 - **Why:** User directed; prevents half-wired agent before services/API land.
 - **Advantage:** Clear verify commands; fewer “works on my machine” gaps.
 - **Expected:** Phase 0 all 6 checks green → Phase 1 services.
-- **Actual:** Phase 0–9 PASS. Verify loop: fix push → Jev re-check → `resolved` + comment. Next: Phase 10 deploy.
+- **Actual:** Phase 0–10 mostly done. Backend live: https://backend-production-af37c.up.railway.app/api/health. Dashboard Vercel preview deployed (auth protection). Demo webhook not set (`admin:repo_hook` scope missing). Next: Phase 11 CI if continuing.

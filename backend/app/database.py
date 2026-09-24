@@ -35,7 +35,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     verification_json   TEXT,
     is_verified         INTEGER DEFAULT 0,
     jev_confidences     TEXT,
-    requirement_scores  TEXT
+    requirement_scores  TEXT,
+    cursor_agent_id     TEXT
 );
 
 CREATE TABLE IF NOT EXISTS trace_steps (
@@ -95,6 +96,7 @@ async def _migrate_columns(db: aiosqlite.Connection) -> None:
     for col, decl in (
         ("jev_confidences", "TEXT"),
         ("requirement_scores", "TEXT"),
+        ("cursor_agent_id", "TEXT"),
     ):
         if col not in existing:
             await db.execute(f"ALTER TABLE tasks ADD COLUMN {col} {decl}")

@@ -11,3 +11,5 @@ typesafe-sdk>=0.1.0
 pytest>=8.0.0
 pytest-asyncio>=0.24.0
 pytest-timeout>=2.3.0
+cursor-sdk>=0.1.0
+discord.py>=2.4.0
