@@ -1,5 +1,7 @@
 """Discord bot started from the FastAPI lifespan when a token is set."""
 
+import logging
+
 import discord
 from discord.ext import commands
 
@@ -20,6 +22,8 @@ from app.discord.views import (
     PartialGateView,
     ReviewView,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class SentinelBot(commands.Bot):
@@ -60,14 +64,21 @@ class SentinelBot(commands.Bot):
         view = ApprovalView(task_id=task["id"], repo=task["repo"], pr_number=task["pr_number"])
         await self.channel.send(embed=embed, view=view)
 
-    async def send_agent_complete(self, task_id: str, result: dict, view=None):
+    async def _replace_progress(self, message, embed, view=None):
+        if message is not None:
+            try:
+                await message.edit(content=None, embed=embed, view=view)
+                return
+            except Exception:
+                logger.warning("could not turn the progress message into the result", exc_info=True)
         if self.channel is None:
             return
-        await self.channel.send(embed=build_agent_result_embed(result), view=view)
+        await self.channel.send(embed=embed, view=view)
 
-    async def send_gate_result(self, task_id: str, result: dict, gate: dict):
-        if self.channel is None:
-            return
+    async def send_agent_complete(self, task_id: str, result: dict, view=None, message=None):
+        await self._replace_progress(message, build_agent_result_embed(result), view)
+
+    async def send_gate_result(self, task_id: str, result: dict, gate: dict, message=None):
         pr_url = result.get("pr_url")
         verdict = gate.get("verdict")
         if verdict == "passed":
@@ -80,7 +91,7 @@ class SentinelBot(commands.Bot):
         else:
             embed = build_validation_failed_embed(gate, result)
             view = FailedGateView(task_id=task_id, pr_url=pr_url)
-        await self.channel.send(embed=embed, view=view)
+        await self._replace_progress(message, embed, view)
 
     async def send_verification_result(self, task_id: str, verification: dict):
         if self.channel is None:

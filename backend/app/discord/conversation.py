@@ -11,7 +11,7 @@ import uuid
 from app.agent.prompts import DISCORD_AGENT_PROMPT
 from app.config import settings
 from app.database import get_db
-from app.services.cursor_client import cursor, model_label
+from app.services.cursor_client import cursor, format_status_reply, model_label
 from app.services.github_client import GitHubClient
 from app.services.task_manager import get_health_stats, update_task_status
 
@@ -364,11 +364,8 @@ async def build_dynamic_context(message) -> str:
             status = await cursor.get_run_status(agent_id)
             agent_block = (
                 "Cursor agent:\n"
-                f"Agent ID: {agent_id}\n"
-                f"Status: {status.get('status')}\n"
-                f"Model: {model_label(cursor.default_model)}\n"
-                f"Branch: {status.get('branch') or 'n/a'}\n"
-                f"PR URL: {status.get('pr_url') or 'none'}"
+                f"{format_status_reply(agent_id, status)}\n"
+                f"Model: {model_label(cursor.default_model)}"
             )
         except Exception as exc:
             logger.warning("cursor status for chat context failed", exc_info=True)
@@ -535,13 +532,7 @@ async def _status_text(task: dict | None) -> str:
     if task.get("cursor_agent_id"):
         try:
             status = await cursor.get_run_status(task["cursor_agent_id"])
-            line += (
-                f" Agent {status.get('status')}."
-                f" Branch {status.get('branch') or 'n/a'}."
-                f" PR {status.get('pr_url') or 'not yet'}."
-            )
-            if status.get("token_usage"):
-                line += f" Tokens {status['token_usage']}."
+            line += "\n" + format_status_reply(task["cursor_agent_id"], status)
         except Exception as exc:
             line += f" Agent status unavailable ({exc})."
     return line

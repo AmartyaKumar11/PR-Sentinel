@@ -11,7 +11,7 @@ import discord
 
 from app.config import settings
 from app.database import get_db
-from app.services.cursor_client import cursor, model_label
+from app.services.cursor_client import cursor, format_progress, model_label
 from app.services.github_client import GitHubClient
 from app.services.task_manager import delete_pending, get_pending, get_task, update_task_status
 
@@ -131,9 +131,32 @@ class ApprovalView(discord.ui.View):
     async def details(self, interaction: discord.Interaction, button: discord.ui.Button):
         await handle_component(interaction)
 
+async def _edit_or_send(msg, channel, content: str):
+    if msg is not None:
+        try:
+            await msg.edit(content=content)
+            return
+        except Exception:
+            logger.warning("progress edit failed", exc_info=True)
+    await channel.send(content)
+
+
 async def monitor_agent(agent_id: str, channel, task_id: str) -> None:
-    """Poll until the cloud agent finishes. A few failed checks do not end the watch."""
+    """Poll until the cloud agent finishes. One Discord message, edited in place."""
     from app.discord.bot import bot
+
+    pr_number = "?"
+    try:
+        task = await get_task(await get_db(), task_id)
+        if task and task.get("pr_number") is not None:
+            pr_number = task["pr_number"]
+    except Exception:
+        logger.warning("progress pr lookup failed", exc_info=True)
+    msg = None
+    try:
+        msg = await channel.send(f"🔧 **Agent working on PR #{pr_number}**\nStatus: starting")
+    except Exception:
+        logger.exception("progress message failed")
 
     failures = 0
     max_failures = 10
@@ -146,18 +169,20 @@ async def monitor_agent(agent_id: str, channel, task_id: str) -> None:
             failures += 1
             logger.exception("cursor status failed agent=%s (%s/%s)", agent_id, failures, max_failures)
             if failures >= max_failures:
-                await channel.send(
+                await _edit_or_send(
+                    msg,
+                    channel,
                     f"⚠️ Lost contact with agent `{agent_id}` "
                     f"after {max_failures} failed checks. "
                     f"Last error: {exc}\n"
-                    f"Check cursor.com/agents for its status."
+                    f"Check cursor.com/agents for its status.",
                 )
                 return
             continue
         state = status.get("status")
         if state == "completed":
             if not status.get("pr_url"):
-                await bot.send_agent_complete(task_id, status)
+                await bot.send_agent_complete(task_id, status, message=msg)
                 return
             try:
                 gate = await _store_gate(task_id, status)
@@ -169,14 +194,21 @@ async def monitor_agent(agent_id: str, channel, task_id: str) -> None:
                     "ci_status": "failed",
                     "summary": f"Quality gate failed: {exc}",
                 }
-            await bot.send_gate_result(task_id, status, gate)
+            await bot.send_gate_result(task_id, status, gate, message=msg)
             return
         if state in ("failed", "cancelled", "expired"):
-            await channel.send(
+            await _edit_or_send(
+                msg,
+                channel,
                 f"⚠️ Agent `{agent_id}` {state}."
-                f"\n{status.get('result_text') or 'No details.'}"
+                f"\n{status.get('result_text') or status.get('last_activity') or 'No details.'}",
             )
             return
+        if msg is not None:
+            try:
+                await msg.edit(content=format_progress(pr_number, status))
+            except Exception:
+                logger.warning("progress edit failed", exc_info=True)
 
 
 class AnalyzeView(discord.ui.View):

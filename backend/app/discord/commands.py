@@ -9,7 +9,7 @@ from discord import app_commands
 from app.config import settings
 from app.discord.views import owner_only
 from app.database import get_db
-from app.services.cursor_client import cursor, model_label
+from app.services.cursor_client import cursor, format_status_reply, model_label
 from app.services.github_client import GitHubClient
 from app.services.task_manager import update_task_status
 
@@ -49,13 +49,7 @@ async def setup_commands(bot):
                 await interaction.followup.send("No active agent.", ephemeral=True)
                 return
             result = await cursor.get_run_status(task["cursor_agent_id"])
-            await interaction.followup.send(
-                f"**Agent:** `{task['cursor_agent_id']}`\n"
-                f"**Status:** {result['status']}\n"
-                f"**Branch:** {result.get('branch') or 'N/A'}\n"
-                f"**PR:** {result.get('pr_url') or 'not yet'}\n"
-                f"**Tokens:** {result.get('token_usage') or 'N/A'}"
-            )
+            await interaction.followup.send(format_status_reply(task["cursor_agent_id"], result))
 
         await _guard(interaction, work)
 

@@ -208,6 +208,37 @@ async def test_webhook_skips_sentinel_branch():
     assert response.json()["reason"] == "PR created by PR Sentinel"
 
 
+def test_run_status_keeps_activity():
+    from app.services.cursor_client import format_progress, format_status_reply, run_status_from
+
+    status = run_status_from(
+        {
+            "status": "RUNNING",
+            "name": "fix orders",
+            "filesChanged": 2,
+            "target": {"branchName": "pr-sentinel/fix-25"},
+        },
+        [
+            {"type": "user_message", "text": "do the thing"},
+            {"type": "assistant_message", "text": "Updating src/orders.py\nadding the check"},
+        ],
+    )
+    assert status["status"] == "running"
+    assert status["branch"] == "pr-sentinel/fix-25"
+    assert status["files_changed_count"] == 2
+    assert status["current_step"] == "Updating src/orders.py adding the check"
+    reply = format_status_reply("bc-test", status)
+    assert "**Files changed:** 2" in reply
+    assert "Currently:" in reply
+    listed = run_status_from(
+        {"status": "RUNNING", "filesChanged": ["src/orders.py", "tests/test_orders.py"], "target": {}},
+        [],
+    )
+    progress = format_progress(25, listed)
+    assert "`src/orders.py`" in progress
+    assert "PR #25" in progress
+
+
 @pytest.mark.asyncio
 async def test_monitor_retries_then_reports_failure(monkeypatch):
     from app.discord import views
@@ -223,20 +254,35 @@ async def test_monitor_retries_then_reports_failure(monkeypatch):
             raise RuntimeError("404")
         return {"status": "failed", "result_text": "boom"}
 
+    async def _no_task(_db, _task_id):
+        return None
+
     monkeypatch.setattr(views.asyncio, "sleep", _sleep)
     monkeypatch.setattr(views.cursor, "get_run_status", _status)
+    monkeypatch.setattr(views, "get_task", _no_task)
+
+    class Msg:
+        def __init__(self, text):
+            self.content = text
+
+        async def edit(self, content=None, **_kwargs):
+            if content is not None:
+                self.content = content
 
     class Chan:
         def __init__(self):
             self.sent = []
 
         async def send(self, text):
-            self.sent.append(text)
+            msg = Msg(text)
+            self.sent.append(msg)
+            return msg
 
     chan = Chan()
     await views.monitor_agent("bc-test", chan, "task-1")
     assert calls["n"] == 3
-    assert chan.sent == ["⚠️ Agent `bc-test` failed.\nboom"]
+    assert len(chan.sent) == 1
+    assert chan.sent[0].content == "⚠️ Agent `bc-test` failed.\nboom"
 
 
 def test_find_issue_from_body_and_branch():
