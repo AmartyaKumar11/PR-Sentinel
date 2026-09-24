@@ -20,7 +20,7 @@ _PR_URL = re.compile(r"github\.com/([^/]+)/([^/]+)/pull/(\d+)")
 
 async def _active_agent(db):
     row = await db.execute(
-        "SELECT id, cursor_agent_id, repo, pr_number, severity FROM tasks "
+        "SELECT id, cursor_agent_id, repo, pr_number, severity, accepted_at FROM tasks "
         "WHERE cursor_agent_id IS NOT NULL AND status NOT IN ('resolved','error','dismissed') "
         "ORDER BY created_at DESC LIMIT 1"
     )
@@ -49,7 +49,9 @@ async def setup_commands(bot):
                 await interaction.followup.send("No active agent.", ephemeral=True)
                 return
             result = await cursor.get_run_status(task["cursor_agent_id"])
-            await interaction.followup.send(format_status_reply(task["cursor_agent_id"], result))
+            await interaction.followup.send(
+                format_status_reply(task["cursor_agent_id"], result, task.get("accepted_at"))
+            )
 
         await _guard(interaction, work)
 

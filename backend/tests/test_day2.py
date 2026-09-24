@@ -227,16 +227,34 @@ def test_run_status_keeps_activity():
     assert status["branch"] == "pr-sentinel/fix-25"
     assert status["files_changed_count"] == 2
     assert status["current_step"] == "Updating src/orders.py adding the check"
+    opening = run_status_from(
+        {"status": "RUNNING", "createdAt": "2026-09-24T16:04:13Z", "target": {}},
+        [
+            {"type": "assistant_message", "text": "I'll start by reading the file"},
+            {"type": "assistant_message", "text": "Removing create_invoice from billing.py"},
+        ],
+    )
+    assert opening["current_step"] == "Removing create_invoice from billing.py"
+    assert "I'll start" not in opening["current_step"]
     reply = format_status_reply("bc-test", status)
-    assert "**Files changed:** 2" in reply
-    assert "Currently:" in reply
+    assert "**Files:** 2" in reply
+    assert "Last update:" in reply
     listed = run_status_from(
         {"status": "RUNNING", "filesChanged": ["src/orders.py", "tests/test_orders.py"], "target": {}},
         [],
     )
+    from datetime import datetime, timezone
+
+    from app.services.cursor_client import elapsed_since
+
+    assert elapsed_since(
+        "2026-09-24T16:04:13+00:00",
+        datetime(2026, 9, 24, 16, 6, 28, tzinfo=timezone.utc),
+    ) == "2m 15s"
     progress = format_progress(25, listed)
-    assert "`src/orders.py`" in progress
+    assert "src/orders.py" in progress
     assert "PR #25" in progress
+    assert "PR: not yet" in progress
 
 
 @pytest.mark.asyncio

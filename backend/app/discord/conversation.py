@@ -532,7 +532,9 @@ async def _status_text(task: dict | None) -> str:
     if task.get("cursor_agent_id"):
         try:
             status = await cursor.get_run_status(task["cursor_agent_id"])
-            line += "\n" + format_status_reply(task["cursor_agent_id"], status)
+            line += "\n" + format_status_reply(
+                task["cursor_agent_id"], status, task.get("accepted_at")
+            )
         except Exception as exc:
             line += f" Agent status unavailable ({exc})."
     return line

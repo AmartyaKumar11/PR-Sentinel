@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 import httpx
 
 from app.config import settings
@@ -46,14 +48,7 @@ def run_status_from(data: dict, messages: list | None = None) -> dict:
     if raw_files is None:
         raw_files = data.get("files_edited")
     files = _file_names(raw_files)
-    last = ""
-    for msg in reversed(messages or []):
-        if not isinstance(msg, dict) or msg.get("type") == "user_message":
-            continue
-        text = msg.get("text") or msg.get("content") or ""
-        if isinstance(text, str) and text.strip():
-            last = " ".join(text.split())[:500]
-            break
+    last = _latest_activity(messages)
     return {
         "status": public_status(data.get("status")),
         "result_text": data.get("summary") or "",
@@ -66,38 +61,75 @@ def run_status_from(data: dict, messages: list | None = None) -> dict:
         "files_changed_count": raw_files if isinstance(raw_files, int) else (len(files) or None),
         "lines_added": data.get("linesAdded"),
         "lines_removed": data.get("linesRemoved"),
+        "created_at": data.get("createdAt") or "",
         "last_activity": last,
         "current_step": last,
     }
 
 
-def activity_bits(status: dict) -> tuple[str, str]:
+def _latest_activity(messages: list | None) -> str:
+    """Conversation is oldest-first. The last assistant line is the current step."""
+    for msg in reversed(messages or []):
+        if not isinstance(msg, dict) or msg.get("type") == "user_message":
+            continue
+        text = msg.get("text") or msg.get("content") or ""
+        if isinstance(text, str) and text.strip():
+            return " ".join(text.split())[:500]
+    return ""
+
+
+def elapsed_since(iso: str | None, now: datetime | None = None) -> str:
+    if not iso:
+        return ""
+    try:
+        started = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+    except ValueError:
+        return ""
+    if started.tzinfo is None:
+        started = started.replace(tzinfo=timezone.utc)
+    now = now or datetime.now(timezone.utc)
+    seconds = max(0, int((now - started).total_seconds()))
+    minutes, sec = divmod(seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours}h {minutes}m {sec:02d}s"
+    return f"{minutes}m {sec:02d}s"
+
+
+def _files_summary(status: dict) -> str:
     files = status.get("files_edited") or status.get("files_changed") or []
     names = _file_names(files) if isinstance(files, list) else []
-    if names:
-        files_line = ", ".join(f"`{name}`" for name in names[-5:])
-    elif isinstance(status.get("files_changed_count"), int):
-        files_line = str(status["files_changed_count"])
-    else:
-        files_line = ""
-    activity = status.get("current_step") or status.get("last_activity") or ""
-    if not isinstance(activity, str):
-        activity = ""
-    return files_line, " ".join(activity.split())[:200]
+    count = status.get("files_changed_count")
+    shown = ", ".join(names[-5:])
+    if isinstance(count, int) and shown:
+        return f"{count} ({shown})"
+    if shown:
+        return shown
+    if isinstance(count, int):
+        return str(count)
+    return ""
 
 
-def format_status_reply(agent_id: str, status: dict) -> str:
-    files_line, activity = activity_bits(status)
+def _status_label(status: dict, launched_at: str | None = None) -> str:
+    state = status.get("status") or "running"
+    elapsed = elapsed_since(launched_at or status.get("created_at"))
+    if elapsed:
+        return f"{state} ({elapsed})"
+    return state
+
+
+def format_status_reply(agent_id: str, status: dict, launched_at: str | None = None) -> str:
+    files_line = _files_summary(status)
+    activity = (status.get("current_step") or status.get("last_activity") or "")[:200]
     lines = [
         f"**Agent:** `{agent_id}`",
-        f"**Status:** {status.get('status')}",
+        f"**Status:** {_status_label(status, launched_at)}",
         f"**Branch:** `{status.get('branch') or 'creating...'}`",
     ]
     if files_line:
-        label = "Files" if (status.get("files_changed") or status.get("files_edited")) else "Files changed"
-        lines.append(f"**{label}:** {files_line}")
+        lines.append(f"**Files:** {files_line}")
     if activity:
-        lines.append(f"**Currently:** {activity}")
+        lines.append(f"**Last update:** {activity}")
     lines.append(f"**PR:** {status.get('pr_url') or 'not yet'}")
     if status.get("token_usage"):
         lines.append(f"**Tokens:** {status['token_usage']}")
@@ -105,19 +137,18 @@ def format_status_reply(agent_id: str, status: dict) -> str:
 
 
 def format_progress(pr_number, status: dict) -> str:
-    files_line, activity = activity_bits(status)
+    files_line = _files_summary(status)
+    activity = (status.get("current_step") or status.get("last_activity") or "")[:200]
     text = (
         f"🔧 **Agent working on PR #{pr_number}**\n"
-        f"Status: {status.get('status')}\n"
+        f"Status: {_status_label(status)}\n"
         f"Branch: `{status.get('branch') or 'creating...'}`\n"
     )
     if files_line:
-        label = "Files touched" if (status.get("files_changed") or status.get("files_edited")) else "Files changed"
-        text += f"{label}: {files_line}\n"
+        text += f"Files touched: {files_line}\n"
+    text += f"PR: {status.get('pr_url') or 'not yet'}"
     if activity:
-        text += f"\n> {activity}"
-    if status.get("pr_url"):
-        text += f"\nPR: {status['pr_url']}"
+        text += f"\n\nLast update: {activity}"
     return text[:1900]
 
 
