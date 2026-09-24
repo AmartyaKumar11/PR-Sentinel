@@ -43,7 +43,62 @@ def _tag(view: discord.ui.View, task_id: str) -> None:
         child.custom_id = f"prs:{slug}:{task_id}"[:100]
 
 
-async def _run_button(interaction: discord.Interaction, view: discord.ui.View, work) -> None:
+_claimed: set[int] = set()
+_override_ready: set[str] = set()
+
+
+def component_parts(custom_id: str) -> tuple[str, str]:
+    parts = (custom_id or "").split(":", 2)
+    if len(parts) != 3 or parts[0] != "prs" or not parts[1] or not parts[2]:
+        return "", ""
+    return parts[1], parts[2]
+
+
+def claim_interaction(interaction: discord.Interaction) -> bool:
+    """One click must launch once. The view callback and the fallback listener both call in."""
+    if interaction.id in _claimed or interaction.response.is_done():
+        return False
+    _claimed.add(interaction.id)
+    return True
+
+
+def _component_label(interaction: discord.Interaction) -> str:
+    custom_id = (interaction.data or {}).get("custom_id")
+    message = interaction.message
+    if not message or not custom_id:
+        return ""
+    for row in message.components:
+        for child in getattr(row, "children", ()) or ():
+            if getattr(child, "custom_id", None) == custom_id:
+                return child.label or ""
+    return ""
+
+
+def _pr_url_from_message(interaction: discord.Interaction) -> str | None:
+    message = interaction.message
+    if not message:
+        return None
+    for embed in message.embeds:
+        for field in embed.fields:
+            if field.name == "Pull Request" and field.value:
+                return field.value
+    return None
+
+
+async def _disable_buttons(interaction: discord.Interaction) -> None:
+    message = interaction.message
+    if not message or not message.components:
+        return
+    try:
+        view = discord.ui.View.from_message(message, timeout=None)
+        for child in view.children:
+            child.disabled = True
+        await message.edit(view=view)
+    except Exception:
+        logger.exception("could not disable discord buttons")
+
+
+async def _run_button(interaction: discord.Interaction, work) -> None:
     """Defer, run the click, and always answer. A thrown launch must not stick on thinking."""
     if not await owner_only(interaction):
         return
@@ -53,13 +108,7 @@ async def _run_button(interaction: discord.Interaction, view: discord.ui.View, w
     except Exception as exc:
         logger.exception("discord button failed")
         await interaction.followup.send(f"⚠️ Failed: {exc}", ephemeral=True)
-    for child in view.children:
-        child.disabled = True
-    if interaction.message:
-        try:
-            await interaction.message.edit(view=view)
-        except Exception:
-            logger.exception("could not disable discord buttons")
+    await _disable_buttons(interaction)
 
 
 class ApprovalView(discord.ui.View):
@@ -72,64 +121,15 @@ class ApprovalView(discord.ui.View):
 
     @discord.ui.button(label="Approve Fix", style=discord.ButtonStyle.green, emoji="✅")
     async def approve(self, interaction: discord.Interaction, button: discord.ui.Button):
-        async def work():
-            db = await get_db()
-            task = await get_task(db, self.task_id)
-            if not task:
-                await interaction.followup.send("Task not found.", ephemeral=True)
-                return
-            await update_task_status(db, self.task_id, "accepted")
-            result = await cursor.launch_agent(
-                repo_full_name=self.repo,
-                prompt=task.get("composer_prompt") or "",
-                branch=f"pr-sentinel/fix-{self.pr_number}",
-            )
-            await db.execute(
-                "UPDATE tasks SET cursor_agent_id = ? WHERE id = ?",
-                (result["agent_id"], self.task_id),
-            )
-            await db.commit()
-            await interaction.followup.send(
-                f"🚀 Cursor Cloud Agent launched!\n"
-                f"**Agent ID:** `{result['agent_id']}`\n"
-                f"**Model:** {model_label(result['model'])}\n"
-                f"**Repo:** {result['repo']}\n\n"
-                f"Use `/status` to check progress, `/stop` to cancel."
-            )
-            asyncio.create_task(monitor_agent(result["agent_id"], interaction.channel, self.task_id))
-
-        await _run_button(interaction, self, work)
+        await handle_component(interaction)
 
     @discord.ui.button(label="Reject", style=discord.ButtonStyle.red, emoji="❌")
     async def reject(self, interaction: discord.Interaction, button: discord.ui.Button):
-        async def work():
-            db = await get_db()
-            await update_task_status(db, self.task_id, "dismissed")
-            await interaction.followup.send("Task dismissed.", ephemeral=True)
-
-        await _run_button(interaction, self, work)
+        await handle_component(interaction)
 
     @discord.ui.button(label="View Details", style=discord.ButtonStyle.blurple, emoji="📋")
     async def details(self, interaction: discord.Interaction, button: discord.ui.Button):
-        async def work():
-            db = await get_db()
-            task = await get_task(db, self.task_id)
-            raw = (task or {}).get("diagnosis_json") or "{}"
-            diag = json_loads(raw)
-            missing = (diag.get("intent_alignment") or {}).get("missing") or []
-            creep = (diag.get("intent_alignment") or {}).get("scope_creep") or []
-            blast = diag.get("blast_radius") or {}
-            lines = ["**Missing requirements:**"]
-            lines += [f"  ⚠️ {m}" for m in missing] or ["  none"]
-            lines.append("\n**Scope creep:**")
-            lines += [f"  🔀 {s}" for s in creep] or ["  none"]
-            lines.append(f"\n**Blast radius:** risk {blast.get('risk_score', 0):.2f}")
-            lines.append(f"**Path:** `{blast.get('highest_risk_path') or 'N/A'}`")
-            untested = ", ".join(blast.get("untested_impacted") or []) or "all covered"
-            lines.append(f"**Untested:** {untested}")
-            await interaction.followup.send("\n".join(lines), ephemeral=True)
-
-        await _run_button(interaction, self, work)
+        await handle_component(interaction)
 
 async def monitor_agent(agent_id: str, channel, task_id: str) -> None:
     """Poll until the cloud agent finishes. A few failed checks do not end the watch."""
@@ -187,29 +187,7 @@ class AnalyzeView(discord.ui.View):
 
     @discord.ui.button(label="Analyze with PR Sentinel", style=discord.ButtonStyle.green, emoji="🔍")
     async def analyze(self, interaction: discord.Interaction, button: discord.ui.Button):
-        async def work():
-            db = await get_db()
-            pending = await get_pending(db, self.pending_id)
-            if not pending:
-                await interaction.followup.send("This PR is no longer waiting for analysis.", ephemeral=True)
-                return
-            await delete_pending(db, self.pending_id)
-            await interaction.followup.send(f"🔍 Analyzing PR #{pending['pr_number']}...")
-            owner, repo = pending["repo"].split("/", 1)
-            from app.routes.webhook import _agent
-
-            asyncio.create_task(
-                _agent.run(
-                    str(uuid.uuid4()),
-                    owner,
-                    repo,
-                    int(pending["pr_number"]),
-                    pending["head_sha"],
-                    mode="full",
-                )
-            )
-
-        await _run_button(interaction, self, work)
+        await handle_component(interaction)
 
 
 class ReviewView(discord.ui.View):
@@ -221,23 +199,15 @@ class ReviewView(discord.ui.View):
 
     @discord.ui.button(label="Merge", style=discord.ButtonStyle.green, emoji="🔀")
     async def merge(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await _run_button(interaction, self, lambda: _merge_pr(interaction, self.pr_url))
+        await handle_component(interaction)
 
     @discord.ui.button(label="Reject Fix", style=discord.ButtonStyle.red, emoji="🚫")
     async def reject_fix(self, interaction: discord.Interaction, button: discord.ui.Button):
-        async def work():
-            parsed = parse_pr_url(self.pr_url or "")
-            if parsed:
-                await GitHubClient().close_pr(*parsed)
-            await interaction.followup.send(
-                "Fix PR closed. Task re-dispatched for manual fix.", ephemeral=True
-            )
-
-        await _run_button(interaction, self, work)
+        await handle_component(interaction)
 
     @discord.ui.button(label="Re-run Agent", style=discord.ButtonStyle.blurple, emoji="🔄")
     async def rerun(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await _run_button(interaction, self, lambda: _relaunch(interaction, self.task_id))
+        await handle_component(interaction)
 
 
 class FailedGateView(discord.ui.View):
@@ -250,26 +220,15 @@ class FailedGateView(discord.ui.View):
 
     @discord.ui.button(label="Re-run Agent", style=discord.ButtonStyle.blurple, emoji="🔄")
     async def rerun(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await _run_button(interaction, self, lambda: _relaunch(interaction, self.task_id))
+        await handle_component(interaction)
 
     @discord.ui.button(label="Override & Merge", style=discord.ButtonStyle.green, emoji="⚠️")
     async def override(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not await owner_only(interaction):
-            return
-        if not self.confirmed:
-            self.confirmed = True
-            parsed = parse_pr_url(self.pr_url or "")
-            number = parsed[2] if parsed else "?"
-            await interaction.response.send_message(
-                f"Are you sure? This will merge PR #{number}. Click Override & Merge again to confirm.",
-                ephemeral=True,
-            )
-            return
-        await _run_button(interaction, self, lambda: _merge_pr(interaction, self.pr_url))
+        await handle_component(interaction)
 
     @discord.ui.button(label="Dismiss", style=discord.ButtonStyle.red, emoji="🗑️")
     async def dismiss(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await _run_button(interaction, self, lambda: _dismiss(interaction, self.task_id))
+        await handle_component(interaction)
 
 
 class PartialGateView(discord.ui.View):
@@ -281,15 +240,146 @@ class PartialGateView(discord.ui.View):
 
     @discord.ui.button(label="Merge Anyway", style=discord.ButtonStyle.green, emoji="🔀")
     async def merge(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await _run_button(interaction, self, lambda: _merge_pr(interaction, self.pr_url))
+        await handle_component(interaction)
 
     @discord.ui.button(label="Re-run Agent", style=discord.ButtonStyle.blurple, emoji="🔄")
     async def rerun(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await _run_button(interaction, self, lambda: _relaunch(interaction, self.task_id))
+        await handle_component(interaction)
 
     @discord.ui.button(label="Dismiss", style=discord.ButtonStyle.red, emoji="🗑️")
     async def dismiss(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await _run_button(interaction, self, lambda: _dismiss(interaction, self.task_id))
+        await handle_component(interaction)
+
+
+async def handle_component(interaction: discord.Interaction) -> None:
+    """Answer a button even when the in-memory view was lost."""
+    if interaction.type != discord.InteractionType.component:
+        return
+    slug, entity_id = component_parts((interaction.data or {}).get("custom_id") or "")
+    if not slug:
+        return
+    if not claim_interaction(interaction):
+        return
+    label = _component_label(interaction)
+    logger.info("discord component %s %s", label or slug, entity_id)
+    if label == "Override & Merge":
+        await _override_click(interaction, entity_id)
+        return
+
+    async def work():
+        await _dispatch_label(label, entity_id, interaction)
+
+    await _run_button(interaction, work)
+
+
+async def _dispatch_label(label: str, entity_id: str, interaction: discord.Interaction) -> None:
+    if label == "Approve Fix":
+        await _approve_fix(interaction, entity_id)
+    elif label == "Reject":
+        await _dismiss(interaction, entity_id)
+    elif label == "View Details":
+        await _show_details(interaction, entity_id)
+    elif label == "Analyze with PR Sentinel":
+        await _analyze_pending(interaction, entity_id)
+    elif label in ("Merge", "Merge Anyway"):
+        await _merge_pr(interaction, _pr_url_from_message(interaction))
+    elif label == "Reject Fix":
+        parsed = parse_pr_url(_pr_url_from_message(interaction) or "")
+        if parsed:
+            await GitHubClient().close_pr(*parsed)
+        await interaction.followup.send(
+            "Fix PR closed. Task re-dispatched for manual fix.", ephemeral=True
+        )
+    elif label == "Re-run Agent":
+        await _relaunch(interaction, entity_id)
+    elif label == "Dismiss":
+        await _dismiss(interaction, entity_id)
+    else:
+        await interaction.followup.send(f"Unknown button: {label or 'unlabeled'}", ephemeral=True)
+
+
+async def _override_click(interaction: discord.Interaction, entity_id: str) -> None:
+    if not await owner_only(interaction):
+        return
+    pr_url = _pr_url_from_message(interaction)
+    if entity_id not in _override_ready:
+        _override_ready.add(entity_id)
+        parsed = parse_pr_url(pr_url or "")
+        number = parsed[2] if parsed else "?"
+        await interaction.response.send_message(
+            f"Are you sure? This will merge PR #{number}. Click Override & Merge again to confirm.",
+            ephemeral=True,
+        )
+        return
+    await _run_button(interaction, lambda: _merge_pr(interaction, pr_url))
+
+
+async def _approve_fix(interaction: discord.Interaction, task_id: str) -> None:
+    db = await get_db()
+    task = await get_task(db, task_id)
+    if not task:
+        await interaction.followup.send("Task not found.", ephemeral=True)
+        return
+    await update_task_status(db, task_id, "accepted")
+    result = await cursor.launch_agent(
+        repo_full_name=task["repo"],
+        prompt=task.get("composer_prompt") or "",
+        branch=f"pr-sentinel/fix-{task['pr_number']}",
+    )
+    await db.execute(
+        "UPDATE tasks SET cursor_agent_id = ? WHERE id = ?",
+        (result["agent_id"], task_id),
+    )
+    await db.commit()
+    await interaction.followup.send(
+        f"🚀 Cursor Cloud Agent launched!\n"
+        f"**Agent ID:** `{result['agent_id']}`\n"
+        f"**Model:** {model_label(result['model'])}\n"
+        f"**Repo:** {result['repo']}\n\n"
+        f"Use `/status` to check progress, `/stop` to cancel."
+    )
+    asyncio.create_task(monitor_agent(result["agent_id"], interaction.channel, task_id))
+
+
+async def _show_details(interaction: discord.Interaction, task_id: str) -> None:
+    db = await get_db()
+    task = await get_task(db, task_id)
+    diag = json_loads((task or {}).get("diagnosis_json"))
+    missing = (diag.get("intent_alignment") or {}).get("missing") or []
+    creep = (diag.get("intent_alignment") or {}).get("scope_creep") or []
+    blast = diag.get("blast_radius") or {}
+    lines = ["**Missing requirements:**"]
+    lines += [f"  ⚠️ {m}" for m in missing] or ["  none"]
+    lines.append("\n**Scope creep:**")
+    lines += [f"  🔀 {s}" for s in creep] or ["  none"]
+    lines.append(f"\n**Blast radius:** risk {blast.get('risk_score', 0):.2f}")
+    lines.append(f"**Path:** `{blast.get('highest_risk_path') or 'N/A'}`")
+    untested = ", ".join(blast.get("untested_impacted") or []) or "all covered"
+    lines.append(f"**Untested:** {untested}")
+    await interaction.followup.send("\n".join(lines), ephemeral=True)
+
+
+async def _analyze_pending(interaction: discord.Interaction, pending_id: str) -> None:
+    db = await get_db()
+    pending = await get_pending(db, pending_id)
+    if not pending:
+        await interaction.followup.send("This PR is no longer waiting for analysis.", ephemeral=True)
+        return
+    await delete_pending(db, pending_id)
+    await interaction.followup.send(f"🔍 Analyzing PR #{pending['pr_number']}...")
+    owner, repo = pending["repo"].split("/", 1)
+    from app.routes.webhook import _agent
+
+    asyncio.create_task(
+        _agent.run(
+            str(uuid.uuid4()),
+            owner,
+            repo,
+            int(pending["pr_number"]),
+            pending["head_sha"],
+            mode="full",
+        )
+    )
 
 
 async def _merge_pr(interaction: discord.Interaction, pr_url: str | None) -> None:

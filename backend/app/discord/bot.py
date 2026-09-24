@@ -87,6 +87,11 @@ class SentinelBot(commands.Bot):
             return
         await self.channel.send(embed=build_verification_embed(verification))
 
+    async def on_interaction(self, interaction: discord.Interaction):
+        from app.discord.views import handle_component
+
+        await handle_component(interaction)
+
     async def on_message(self, message: discord.Message):
         if message.author.id != int(settings.DISCORD_OWNER_ID):
             return

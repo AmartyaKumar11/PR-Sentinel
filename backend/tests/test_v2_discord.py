@@ -90,3 +90,13 @@ async def test_owner_only_rejects_others(monkeypatch):
 def test_parse_pr_url():
     assert parse_pr_url("https://github.com/o/r/pull/9") == ("o", "r", 9)
     assert parse_pr_url("nope") is None
+
+
+def test_component_parts():
+    from app.discord.views import component_parts
+
+    assert component_parts("prs:approve:2e2000d6-7afc-473e-a79d-420f81f6cd97") == (
+        "approve",
+        "2e2000d6-7afc-473e-a79d-420f81f6cd97",
+    )
+    assert component_parts("nope") == ("", "")
