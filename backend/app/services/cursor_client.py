@@ -153,3 +153,6 @@ class CursorClient:
             return {"status": "running", "run_id": run.id or None}
 
         return await asyncio.to_thread(_resume)
+
+
+cursor = CursorClient()

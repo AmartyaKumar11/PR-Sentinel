@@ -7,10 +7,8 @@ from discord import app_commands
 
 from app.config import settings
 from app.database import get_db
-from app.services.cursor_client import CursorClient
+from app.services.cursor_client import cursor
 from app.services.github_client import GitHubClient
-
-cursor = CursorClient()
 
 _PR_URL = re.compile(r"github\.com/([^/]+)/([^/]+)/pull/(\d+)")
 

@@ -15,6 +15,7 @@ class SentinelBot(commands.Bot):
         intents.message_content = True
         super().__init__(command_prefix="!", intents=intents)
         self.channel = None
+        self._pending_action = None
 
     async def setup_hook(self):
         await setup_commands(self)
@@ -50,6 +51,12 @@ class SentinelBot(commands.Bot):
         if self.channel is None:
             return
         await self.channel.send(embed=build_verification_embed(verification))
+
+    async def on_message(self, message: discord.Message):
+        await self.process_commands(message)
+        from app.discord.conversation import handle_message
+
+        await handle_message(self, message)
 
 
 bot = SentinelBot()

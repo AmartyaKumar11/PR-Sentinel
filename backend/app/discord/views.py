@@ -9,12 +9,11 @@ import re
 import discord
 
 from app.database import get_db
-from app.services.cursor_client import CursorClient
+from app.services.cursor_client import cursor
 from app.services.github_client import GitHubClient
 from app.services.task_manager import get_task, update_task_status
 
 logger = logging.getLogger(__name__)
-cursor = CursorClient()
 
 _PR_URL = re.compile(r"github\.com/([^/]+)/([^/]+)/pull/(\d+)")
 
