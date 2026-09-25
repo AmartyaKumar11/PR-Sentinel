@@ -13,7 +13,7 @@ from app.config import settings
 from app.database import get_db
 from app.services.cursor_client import cursor, format_status_reply, model_label
 from app.services.github_client import GitHubClient
-from app.services.task_manager import get_health_stats, update_task_status
+from app.services.task_manager import accept_task, get_health_stats, update_task_status
 
 logger = logging.getLogger(__name__)
 
@@ -576,10 +576,7 @@ async def _launch(task: dict | None, params: dict, channel=None) -> str:
         (result["agent_id"], task["id"]),
     )
     await db.commit()
-    try:
-        await update_task_status(db, task["id"], "accepted")
-    except ValueError:
-        pass
+    await accept_task(db, task["id"])
     if channel is not None:
         from app.discord.views import monitor_agent
 

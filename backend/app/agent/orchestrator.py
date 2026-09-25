@@ -396,6 +396,8 @@ class AgentOrchestrator:
                 )
             else:
                 await update_task_status(db, task_id, "dispatched")
+        else:
+            await update_task_status(db, task_id, "dispatched")
 
         await self._emit_and_persist(
             task_id,

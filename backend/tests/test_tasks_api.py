@@ -24,6 +24,19 @@ async def test_pending_to_dispatched_ok():
 
 
 @pytest.mark.asyncio
+async def test_accept_task_from_pending():
+    from app.services.task_manager import accept_task
+
+    db = await _db()
+    await create_task(db, "t3", "o/r", 3, "abc", "TRIVIAL", "skip", {}, {}, "md", "prompt")
+    await accept_task(db, "t3")
+    row = await (await db.execute("SELECT status, accepted_at FROM tasks WHERE id='t3'")).fetchone()
+    assert row["status"] == "accepted"
+    assert row["accepted_at"]
+    await db.close()
+
+
+@pytest.mark.asyncio
 async def test_resolved_to_accepted_rejected():
     db = await _db()
     await create_task(db, "t2", "o/r", 2, "def", "LOW", "skip", {}, {}, "md", "prompt")

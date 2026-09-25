@@ -13,7 +13,13 @@ from app.config import settings
 from app.database import get_db
 from app.services.cursor_client import cursor, format_progress, model_label
 from app.services.github_client import GitHubClient
-from app.services.task_manager import delete_pending, get_pending, get_task, update_task_status
+from app.services.task_manager import (
+    accept_task,
+    delete_pending,
+    get_pending,
+    get_task,
+    update_task_status,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +116,7 @@ async def _run_button(interaction: discord.Interaction, work) -> None:
     except Exception as exc:
         logger.exception("discord button failed")
         await interaction.followup.send(f"⚠️ Failed: {exc}", ephemeral=True)
+        return
     await _disable_buttons(interaction)
 
 
@@ -354,7 +361,7 @@ async def _approve_fix(interaction: discord.Interaction, task_id: str) -> None:
     if not task:
         await interaction.followup.send("Task not found.", ephemeral=True)
         return
-    await update_task_status(db, task_id, "accepted")
+    await accept_task(db, task_id)
     result = await cursor.launch_agent(
         repo_full_name=task["repo"],
         prompt=task.get("composer_prompt") or "",

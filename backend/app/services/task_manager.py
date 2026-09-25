@@ -112,6 +112,16 @@ async def get_task(db, task_id: str) -> dict | None:
     return dict(row) if row else None
 
 
+async def accept_task(db, task_id: str) -> None:
+    """Approve Fix. A skip review stays pending until the click, so dispatch first."""
+    task = await get_task(db, task_id)
+    if not task:
+        raise ValueError("Task not found")
+    if task["status"] == "pending":
+        await update_task_status(db, task_id, "dispatched")
+    await update_task_status(db, task_id, "accepted")
+
+
 async def update_task_status(db, task_id: str, status: str, **extra_fields) -> bool:
     task = await get_task(db, task_id)
     if not task:
