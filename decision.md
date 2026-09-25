@@ -32,11 +32,25 @@ Format: **Decision** · **Why** · **Advantage** · **Expected** · **Actual**
 - **Why:** JEV-INTEGRATION-UPDATE — typed decisions, calibrated scores, cheaper triage.
 - **Advantage:** Lower cost/latency on triage/verify; Scenario 1 auth+missing → CRITICAL override.
 - **Expected:** Specs + client + assemble helpers; full agent loop later.
-- **Actual:** Specs + `JevClient` + helpers + DB columns live; orchestrator runs diagnose → Jev triage → dispatch / verify. `JEV_API_KEY` accepted as `TYPESAFE_API_KEY` alias.
+- **Actual:** Specs + `JevClient` + helpers + DB columns live; orchestrator runs diagnose → Jev triage → dispatch / verify. `JEV_API_KEY` accepted as `TYPESAFE_API_KEY` alias. Per-requirement intent moved to DeepSeek (D-006).
 
 ## D-005 — Follow BUILD-SEQUENCE.md phase gates
 - **Decision:** Build only via BUILD-SEQUENCE phases; no skip until exit gate passes.
 - **Why:** User directed; prevents half-wired agent before services/API land.
 - **Advantage:** Clear verify commands; fewer “works on my machine” gaps.
 - **Expected:** Phase 0 all 6 checks green → Phase 1 services.
-- **Actual:** Phase 0–10 mostly done. Backend live: https://backend-production-af37c.up.railway.app/api/health. Dashboard Vercel preview deployed (auth protection). Demo webhook not set (`admin:repo_hook` scope missing). Next: Phase 11 CI if continuing.
+- **Actual:** Phase 0–11 in repo. Backend on Railway, dashboard on Vercel. CI runs mocked backend pytest (10s timeout), dashboard build, extension compile. Demo webhook created after `admin:repo_hook`.
+
+## D-006 — DeepSeek owns intent alignment
+- **Decision:** Per-requirement "does the diff implement this?" is a DeepSeek diagnose call. Jev keeps severity, trivial/phantom, and verify scores.
+- **Why:** Jev scored "validate email format" at 0.98 from the word "email" in the diff. Lexical match, not implementation.
+- **Advantage:** Strict code reading; addressed/missing lists stop false-passing.
+- **Expected:** Diagnose JSON `addressed` / `missing` / `scope_creep` from DeepSeek; Jev no longer answers those Nouls.
+- **Actual:** Orchestrator calls DeepSeek after the diff + linked issue. Jev triage path unchanged.
+
+## D-007 — Discord + Cursor SDK for the fix loop
+- **Decision:** v1 GitHub comment + editor extension stays. v2 adds Discord approve/reject, then a Cursor cloud agent via `cursor-sdk`. Do not delete v1.
+- **Why:** V2-DISCORD-CURSOR-SDK-UPDATE — phone can approve, watch, and merge without the laptop.
+- **Advantage:** Official SDK (create, stream, cancel, PR). No custom cloud-agent hack.
+- **Expected:** Discord notify → approve → cloud agent → diff in Discord → merge → existing verify.
+- **Actual:** `backend/app/discord/` plus SDK env (`DISCORD_*`, `CURSOR_API_KEY`) live beside v1. v1 comment/extension path still in tree.
