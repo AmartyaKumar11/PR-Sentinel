@@ -62,6 +62,18 @@ def test_fallback_names_unmet_requirements():
     assert "Charge only the price difference." in text
 
 
+def test_prompt_history_keeps_the_replaced_prompt():
+    from app.discord.views import append_prompt_history
+
+    first = append_prompt_history(None, 1, "check the coupon code", "tests still missing")
+    second = append_prompt_history(first, 2, "add the expired test", "still missing")
+    history = json.loads(second)
+    assert history[0]["prompt"] == "check the coupon code"
+    assert history[0]["gate_result"] == "tests still missing"
+    assert history[1]["attempt"] == 2
+    assert append_prompt_history("not-json", 1, "again", "failed").startswith("[")
+
+
 def test_refining_message_counts_to_three():
     from app.discord.views import refining_message
 

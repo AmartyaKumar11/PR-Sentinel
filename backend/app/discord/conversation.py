@@ -494,6 +494,8 @@ async def execute(action: dict, channel=None) -> str:
         if not task:
             return "No task to show a prompt for."
         return f"```\n{_clip(task.get('composer_prompt') or 'No Composer prompt stored.')}\n```"
+    if name == "get_attempts":
+        return _attempts_text(task)
     if name == "get_health":
         stats = await get_health_stats(await get_db())
         return (
@@ -618,6 +620,33 @@ async def _rediagnose(task: dict | None, params: dict) -> str:
         _agent.run(str(uuid.uuid4()), owner, repo, int(task["pr_number"]), task["head_sha"])
     )
     return f"Re-running diagnosis on PR #{task['pr_number']}."
+
+
+def format_prompt_history(raw, current: str = "") -> str:
+    """Each stored attempt, then the prompt that is current now."""
+    try:
+        history = json.loads(raw or "[]")
+    except json.JSONDecodeError:
+        history = []
+    if not isinstance(history, list):
+        history = []
+    lines = []
+    for item in history:
+        if not isinstance(item, dict):
+            continue
+        lines.append(
+            f"Attempt {item.get('attempt')}: {item.get('gate_result') or 'no gate result'}\n"
+            f"{_clip(item.get('prompt') or '', 400)}"
+        )
+    if current:
+        lines.append(f"Current prompt:\n{_clip(current, 400)}")
+    return "\n\n".join(lines) or "No attempts stored."
+
+
+def _attempts_text(task: dict | None) -> str:
+    if not task:
+        return "No task to show attempts for."
+    return format_prompt_history(task.get("prompt_history"), task.get("composer_prompt") or "")
 
 
 async def _trace(task: dict | None) -> str:

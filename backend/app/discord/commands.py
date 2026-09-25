@@ -7,6 +7,7 @@ import discord
 from discord import app_commands
 
 from app.config import settings
+from app.discord.conversation import format_prompt_history
 from app.discord.views import owner_only
 from app.database import get_db
 from app.services.cursor_client import cursor, format_status_reply, model_label
@@ -197,14 +198,17 @@ async def setup_commands(bot):
     async def logs(interaction: discord.Interaction):
         async def work():
             db = await get_db()
-            row = await db.execute("SELECT id FROM tasks ORDER BY created_at DESC LIMIT 1")
+            row = await db.execute(
+                "SELECT id, prompt_history, composer_prompt FROM tasks ORDER BY created_at DESC LIMIT 1"
+            )
             task = await row.fetchone()
             if not task:
                 await interaction.followup.send("No tasks found.", ephemeral=True)
                 return
+            task = dict(task)
             trace = await db.execute(
                 "SELECT phase, type, content FROM trace_steps WHERE task_id = ? ORDER BY id",
-                (dict(task)["id"],),
+                (task["id"],),
             )
             steps = await trace.fetchall()
             log_text = ""
@@ -212,7 +216,10 @@ async def setup_commands(bot):
                 s = dict(s)
                 emoji = {"thought": "💭", "action": "🔧", "observation": "👁", "answer": "✅"}.get(s["type"], "•")
                 log_text += f"{emoji} [{s['phase']}] {s['content'][:100]}\n"
-            await interaction.followup.send(f"```\n{log_text or 'No trace steps recorded.'}\n```")
+            attempts = format_prompt_history(task.get("prompt_history"), task.get("composer_prompt") or "")
+            await interaction.followup.send(
+                f"```\n{log_text or 'No trace steps recorded.'}\n```\n{attempts[:1800]}"
+            )
 
         await _guard(interaction, work)
 

@@ -114,6 +114,8 @@ Information retrieval:
     Query tasks from the database. status can be any valid status or "all". limit defaults to 5.
   {"action": "get_prompt", "params": {"task_id": "..."}}
     Show the Composer prompt that was/will be sent to Cursor.
+  {"action": "get_attempts", "params": {"task_id": "..."}}
+    Show every attempt's prompt and the gate result that rejected it. Use this for "show me the attempts".
   {"action": "get_health", "params": {}}
     Check backend health.
 
@@ -138,7 +140,7 @@ Non-destructive actions execute immediately without confirmation:
   - resume_agent
   - set_model
   - list_models
-  - get_status, get_diff, get_trace, get_tasks, get_prompt, get_health
+  - get_status, get_diff, get_trace, get_tasks, get_prompt, get_attempts, get_health
   - post_comment
   - update_prompt, append_to_prompt
   - rediagnose

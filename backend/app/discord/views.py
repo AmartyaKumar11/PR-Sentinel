@@ -27,6 +27,24 @@ _PR_URL = re.compile(r"github\.com/([^/]+)/([^/]+)/pull/(\d+)")
 MAX_ATTEMPTS = 3
 
 
+def append_prompt_history(raw, attempt: int, prompt: str, summary: str) -> str:
+    """Keep the prompt we are about to replace."""
+    import json
+
+    try:
+        existing = json.loads(raw or "[]")
+    except json.JSONDecodeError:
+        existing = []
+    if not isinstance(existing, list):
+        existing = []
+    existing.append({
+        "attempt": attempt,
+        "prompt": prompt or "",
+        "gate_result": summary or "",
+    })
+    return json.dumps(existing)
+
+
 def refining_message(attempt: int) -> str | None:
     """Discord line for the next try. None means the user can see the failure."""
     if attempt >= MAX_ATTEMPTS:
@@ -648,9 +666,15 @@ async def _launch_retry(channel, task_id: str, status: dict, gate: dict, attempt
         logger.exception("retry launch failed task=%s", task_id)
         return None
     next_attempt = attempt + 1
+    history = append_prompt_history(
+        task.get("prompt_history"),
+        attempt,
+        task.get("composer_prompt") or "",
+        gate.get("summary") or "",
+    )
     await db.execute(
-        "UPDATE tasks SET cursor_agent_id = ?, fix_attempts = ?, composer_prompt = ? WHERE id = ?",
-        (result["agent_id"], next_attempt, retry_prompt, task_id),
+        "UPDATE tasks SET cursor_agent_id = ?, fix_attempts = ?, prompt_history = ?, composer_prompt = ? WHERE id = ?",
+        (result["agent_id"], next_attempt, history, retry_prompt, task_id),
     )
     await db.commit()
     return result["agent_id"]
