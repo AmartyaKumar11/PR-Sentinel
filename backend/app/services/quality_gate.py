@@ -31,23 +31,11 @@ def classify_ci(status: dict | None, runs: list | None) -> str:
     return "no_ci"
 
 
-def _regression_limit(scores: dict[str, float], ci: str) -> float:
-    # A strong fix with CI green can sit above 0.5 without being a real regression.
-    if ci == "passed" and scores and all(v > 0.8 for v in scores.values()):
-        return 0.7
-    return 0.5
-
-
-def judge_alignment(
-    scores: dict[str, float], regression: float, _contained: float = 0, *, ci: str = "passed"
-) -> str:
-    if any(v < 0.4 for v in scores.values()):
+def judge_alignment(scores: dict[str, float]) -> str:
+    """Pass when every missing requirement is covered. CI is the regression check."""
+    if scores and any(v <= 0.6 for v in scores.values()):
         return "fail"
-    if any(v <= 0.6 for v in scores.values()):
-        return "partial"
-    if regression < _regression_limit(scores, ci):
-        return "pass"
-    return "fail"
+    return "pass"
 
 
 def _is_test(path: str) -> bool:
@@ -95,25 +83,16 @@ def _summary(
     scores: dict,
     sanity: dict | None,
     verdict: str,
-    regression: float | None = None,
 ) -> str:
     if verdict == "passed":
-        return (
-            "All checks passed. Fix addresses the missing requirements, "
-            "no regressions detected."
-        )
+        return "All checks passed. CI is green and the fix covers the missing requirements."
     if ci in ("failed", "pending"):
         return f"CI {ci}. Later checks were skipped."
     if alignment == "fail":
-        weak = [name for name, score in scores.items() if score < 0.4]
+        weak = [name for name, score in scores.items() if score <= 0.6]
         if weak:
             return "Fix does not address: " + ", ".join(weak) + "."
-        if regression is not None:
-            return f"Regression risk {regression:.2f} is above the allowed threshold."
         return "Fix does not address the missing requirements."
-    if verdict == "partial":
-        mid = [name for name, score in scores.items() if 0.4 <= score <= 0.6]
-        return "Uncertain whether the fix covers: " + ", ".join(mid) + "."
     reasons = []
     if sanity:
         if sanity["lines_changed"] >= 500:
@@ -125,20 +104,19 @@ def _summary(
     return "Diff sanity failed: " + ", ".join(reasons or ["check failed"]) + "."
 
 
-def _result(ci, scores, regression, sanity, alignment, verdict) -> dict:
+def _result(ci, scores, sanity, alignment, verdict) -> dict:
     return {
         "passed": verdict == "passed",
         "verdict": verdict,
         "ci_status": ci,
         "requirement_alignment": scores,
-        "regression_risk": regression,
         "diff_sanity": sanity
         or {
             "lines_changed": 0,
             "test_files_deleted": False,
             "ci_config_modified": False,
         },
-        "summary": _summary(ci, alignment, scores, sanity, verdict, regression),
+        "summary": _summary(ci, alignment, scores, sanity, verdict),
     }
 
 
@@ -172,7 +150,7 @@ async def validate(
         sha = fix_pr["head_sha"]
         ci = await _poll_ci(github, owner, repo, sha, max_wait, interval)
         if ci in ("failed", "pending"):
-            return _result(ci, {}, None, None, None, "failed")
+            return _result(ci, {}, None, None, "failed")
 
         diff = fix_pr.get("diff")
         if not diff:
@@ -189,24 +167,20 @@ async def validate(
             f"req_{i}": Noul(instructions=f"Does the fix diff implement: '{req}'")
             for i, req in enumerate(missing)
         }
-        questions["introduces_regression"] = Noul(
-            instructions="The fix introduces obvious breaking changes or removes existing functionality"
-        )
-        answers = await jev.evaluate(
-            state={"fix_diff": (diff or "")[:4000], "original_diagnosis": diagnosis},
-            questions=questions,
-        )
-        scores = {req: _noul(answers[f"req_{i}"]) for i, req in enumerate(missing)}
-        regression = _noul(answers["introduces_regression"])
-        alignment = judge_alignment(scores, regression, ci=ci)
-        if alignment == "fail":
-            return _result(ci, scores, regression, None, alignment, "failed")
-
+        scores: dict[str, float] = {}
+        if questions:
+            answers = await jev.evaluate(
+                state={"fix_diff": (diff or "")[:4000], "original_diagnosis": diagnosis},
+                questions=questions,
+            )
+            scores = {req: _noul(answers[f"req_{i}"]) for i, req in enumerate(missing)}
+        alignment = judge_alignment(scores)
         sanity = diff_sanity(diff or "")
+        if alignment != "pass":
+            return _result(ci, scores, sanity, alignment, "failed")
         if not sanity["ok"]:
-            return _result(ci, scores, regression, sanity, alignment, "failed")
-        verdict = "partial" if alignment == "partial" else "passed"
-        return _result(ci, scores, regression, sanity, alignment, verdict)
+            return _result(ci, scores, sanity, alignment, "failed")
+        return _result(ci, scores, sanity, alignment, "passed")
     finally:
         if own_github:
             await github.close()

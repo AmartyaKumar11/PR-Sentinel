@@ -51,6 +51,8 @@ def _tag(view: discord.ui.View, task_id: str) -> None:
 
 _claimed: set[int] = set()
 _override_ready: set[str] = set()
+_busy: set[str] = set()
+_GUARDED = {"Approve Fix", "Analyze with PR Sentinel", "Merge", "Merge Anyway", "Re-run Agent"}
 
 
 def component_parts(custom_id: str) -> tuple[str, str]:
@@ -104,20 +106,102 @@ async def _disable_buttons(interaction: discord.Interaction) -> None:
         logger.exception("could not disable discord buttons")
 
 
-async def _run_button(interaction: discord.Interaction, work) -> None:
-    """Defer, run the click, and always answer. A thrown launch must not stick on thinking."""
+def _take(key: str) -> bool:
+    if key in _busy:
+        return False
+    _busy.add(key)
+    return True
+
+
+def _release(key: str) -> None:
+    _busy.discard(key)
+
+
+async def _reserve(label: str, entity_id: str) -> str | None:
+    """None means this click may proceed. The action is reserved."""
+    if label == "Approve Fix":
+        task = await get_task(await get_db(), entity_id)
+        if task and task.get("status") in ("accepted", "in_progress"):
+            return "Already approved — agent is running."
+        if task and task.get("cursor_agent_id"):
+            return "Agent already launched."
+        if not _take(f"approve:{entity_id}"):
+            return "Already approved — agent is running."
+        return None
+    if label == "Analyze with PR Sentinel":
+        if not await get_pending(await get_db(), entity_id):
+            return "Already analyzed."
+        if not _take(f"analyze:{entity_id}"):
+            return "Already analyzed."
+        return None
+    if label in ("Merge", "Merge Anyway"):
+        if not _take(f"merge:{entity_id}"):
+            return "Already merging this pull request."
+        return None
+    if label == "Re-run Agent":
+        task = await get_task(await get_db(), entity_id)
+        if task and task.get("cursor_agent_id"):
+            try:
+                state = await cursor.get_run_status(task["cursor_agent_id"])
+                if state.get("status") == "running":
+                    return "Agent already launched."
+            except Exception:
+                logger.warning("rerun status check failed", exc_info=True)
+        if not _take(f"rerun:{entity_id}"):
+            return "Agent already launched."
+        return None
+    return None
+
+
+def _busy_key(label: str, entity_id: str) -> str:
+    if label == "Approve Fix":
+        return f"approve:{entity_id}"
+    if label == "Analyze with PR Sentinel":
+        return f"analyze:{entity_id}"
+    if label in ("Merge", "Merge Anyway"):
+        return f"merge:{entity_id}"
+    return f"rerun:{entity_id}"
+
+
+async def _ack_disable(interaction: discord.Interaction) -> None:
+    """Disable the buttons as the interaction acknowledgement."""
+    message = interaction.message
+    if message and message.components:
+        try:
+            view = discord.ui.View.from_message(message, timeout=None)
+            for child in view.children:
+                child.disabled = True
+            await interaction.response.edit_message(view=view)
+            return
+        except Exception:
+            logger.warning("could not disable buttons on ack", exc_info=True)
+    if not interaction.response.is_done():
+        await interaction.response.defer()
+
+
+async def _run_button(interaction: discord.Interaction, work, label: str = "", entity_id: str = "") -> None:
+    """Ack the click, then do the work. A second click does not start a second action."""
     if not await owner_only(interaction):
         return
-    # thinking=True leaves an empty placeholder. Discord then shows
-    # "This interaction failed" even though followup.send already answered.
-    await interaction.response.defer()
+    guarded = label in _GUARDED
+    if guarded:
+        blocked = await _reserve(label, entity_id)
+        if blocked:
+            await interaction.response.send_message(blocked, ephemeral=True)
+            return
+        await _ack_disable(interaction)
+    else:
+        await interaction.response.defer()
     try:
         await work()
     except Exception as exc:
         logger.exception("discord button failed")
+        if guarded:
+            _release(_busy_key(label, entity_id))
         await interaction.followup.send(f"⚠️ Failed: {exc}", ephemeral=True)
         return
-    await _disable_buttons(interaction)
+    if not guarded:
+        await _disable_buttons(interaction)
 
 
 class ApprovalView(discord.ui.View):
@@ -310,7 +394,7 @@ async def handle_component(interaction: discord.Interaction) -> None:
     async def work():
         await _dispatch_label(label, entity_id, interaction)
 
-    await _run_button(interaction, work)
+    await _run_button(interaction, work, label, entity_id)
 
 
 async def _dispatch_label(label: str, entity_id: str, interaction: discord.Interaction) -> None:
@@ -352,7 +436,7 @@ async def _override_click(interaction: discord.Interaction, entity_id: str) -> N
             ephemeral=True,
         )
         return
-    await _run_button(interaction, lambda: _merge_pr(interaction, pr_url))
+    await _run_button(interaction, lambda: _merge_pr(interaction, pr_url), "Merge", entity_id)
 
 
 async def _approve_fix(interaction: discord.Interaction, task_id: str) -> None:

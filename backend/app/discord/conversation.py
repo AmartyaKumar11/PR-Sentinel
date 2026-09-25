@@ -444,6 +444,8 @@ async def execute(action: dict, channel=None) -> str:
     if name == "launch_agent":
         return await _launch(task, params, channel)
     if name == "relaunch_agent":
+        if task and await _agent_running(task):
+            return "Agent is already running — use /status to check progress."
         if task and task.get("cursor_agent_id"):
             await cursor.cancel_agent(task["cursor_agent_id"])
         return await _launch(task, params, channel)
@@ -560,9 +562,24 @@ async def _stop(task: dict | None) -> str:
     return line
 
 
+async def _agent_running(task: dict) -> bool:
+    if not task.get("cursor_agent_id"):
+        return False
+    if task.get("status") not in ("accepted", "in_progress"):
+        return False
+    try:
+        state = await cursor.get_run_status(task["cursor_agent_id"])
+    except Exception:
+        logger.warning("agent running check failed", exc_info=True)
+        return True
+    return state.get("status") == "running"
+
+
 async def _launch(task: dict | None, params: dict, channel=None) -> str:
     if not task:
         return "No task to launch against."
+    if await _agent_running(task):
+        return "Agent is already running — use /status to check progress."
     prompt = params.get("prompt") or task.get("composer_prompt") or task.get("suggested_fix") or ""
     result = await cursor.launch_agent(
         repo_full_name=task["repo"],
