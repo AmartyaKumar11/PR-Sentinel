@@ -12,6 +12,7 @@ from app.agent.prompts import DISCORD_AGENT_PROMPT
 from app.config import settings
 from app.database import get_db
 from app.services.cursor_client import cursor, format_status_reply, model_label
+from app.discord.views import merge_with_conflict_resolution
 from app.services.github_client import GitHubClient
 from app.services.task_manager import accept_task, get_health_stats, update_task_status
 
@@ -455,9 +456,11 @@ async def execute(action: dict, channel=None) -> str:
         return await _stop(task)
     if name == "merge_pr":
         owner, repo, number = _target(params, task)
-        result = await GitHubClient().merge_pr_safe(
-            owner, repo, number, params.get("method") or "squash"
+        result = await merge_with_conflict_resolution(
+            owner, repo, number, channel, params.get("method") or "squash"
         )
+        if result.get("announced"):
+            return ""
         if result.get("merged"):
             return f"Merged PR #{number}."
         return f"Merge failed: {result.get('message')}"

@@ -8,7 +8,7 @@ from discord import app_commands
 
 from app.config import settings
 from app.discord.conversation import format_prompt_history
-from app.discord.views import owner_only
+from app.discord.views import merge_with_conflict_resolution, owner_only
 from app.database import get_db
 from app.services.cursor_client import cursor, format_status_reply, model_label
 from app.services.github_client import GitHubClient
@@ -162,9 +162,11 @@ async def setup_commands(bot):
             if not match:
                 await interaction.followup.send("No PR to merge yet.")
                 return
-            merge_result = await GitHubClient().merge_pr_safe(
-                match.group(1), match.group(2), int(match.group(3))
+            merge_result = await merge_with_conflict_resolution(
+                match.group(1), match.group(2), int(match.group(3)), interaction.channel
             )
+            if merge_result.get("announced"):
+                return
             if merge_result.get("merged"):
                 await interaction.followup.send("✅ Merged! The VERIFY phase will run automatically.")
             else:

@@ -12,7 +12,7 @@ import discord
 from app.config import settings
 from app.database import get_db
 from app.services.cursor_client import cursor, format_progress, model_label
-from app.services.github_client import GitHubClient
+from app.services.github_client import GitHubClient, is_merge_conflict
 from app.services.task_manager import (
     accept_task,
     delete_pending,
@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 
 _PR_URL = re.compile(r"github\.com/([^/]+)/([^/]+)/pull/(\d+)")
 MAX_ATTEMPTS = 3
+_conflict_tasks: set = set()
 
 
 def append_prompt_history(raw, attempt: int, prompt: str, summary: str) -> str:
@@ -619,13 +620,148 @@ async def _analyze_pending(interaction: discord.Interaction, pending_id: str) ->
     )
 
 
+def conflict_prompt(branch: str) -> str:
+    """Tell the agent to rebase this branch. The pull request already exists."""
+    return (
+        f"The PR branch {branch} has merge conflicts with main. "
+        "Your job is to resolve them.\n\n"
+        "Steps:\n"
+        "1. Fetch the latest main: git fetch origin main\n"
+        "2. Rebase onto main: git rebase origin/main\n"
+        "3. For each conflict:\n"
+        "   - Keep the PR's changes (the fix) over main's version\n"
+        "   - If both sides added different code to the same area, "
+        "keep BOTH — the PR's fix AND main's existing code\n"
+        "   - Never delete code that exists on main unless the PR's "
+        "fix explicitly replaces it\n"
+        "4. After resolving all conflicts: git rebase --continue\n"
+        f"5. Force push to the PR branch: git push --force origin {branch}\n"
+        "6. Run the test suite to make sure nothing broke: pytest tests/ -v\n\n"
+        "Do NOT create a new branch. Do NOT open a new PR. "
+        f"Push the resolved result to {branch}."
+    )
+
+
+async def _settle_branch_update(github: GitHubClient, owner: str, repo: str, pr_number: int, old_sha: str) -> None:
+    """GitHub applies update-branch in the background. Wait until the head moves."""
+    for _ in range(4):
+        await asyncio.sleep(3)
+        info = await github.get_pr_info(owner, repo, pr_number)
+        sha = info.get("head_sha") or ""
+        if (sha and sha != old_sha) or info.get("mergeable") is True:
+            return
+
+
+async def _remember_agent(owner: str, repo: str, pr_number: int, agent_id: str) -> None:
+    db = await get_db()
+    await db.execute(
+        "UPDATE tasks SET cursor_agent_id = ? "
+        "WHERE repo = ? AND pr_number = ? AND status NOT IN ('resolved', 'dismissed', 'error')",
+        (agent_id, f"{owner}/{repo}", pr_number),
+    )
+    await db.commit()
+
+
+async def monitor_conflict_resolution(agent_id: str, owner: str, repo: str, pr_number: int, channel) -> None:
+    """Poll the conflict agent, then merge the same pull request. No quality gate."""
+    failures = 0
+    while failures < 10:
+        await asyncio.sleep(15)
+        try:
+            status = await cursor.get_run_status(agent_id)
+            failures = 0
+        except Exception as exc:
+            failures += 1
+            logger.exception("conflict agent status failed agent=%s", agent_id)
+            if failures >= 10:
+                await channel.send(
+                    f"⚠️ Lost contact with the conflict-resolution agent `{agent_id}`. Last error: {exc}"
+                )
+            continue
+        state = status.get("status")
+        if state == "completed":
+            await asyncio.sleep(5)
+            github = GitHubClient()
+            try:
+                result = await github.merge_pr_safe(owner, repo, pr_number, ignore_mergeable=True)
+            finally:
+                await github.close()
+            if result.get("merged"):
+                await channel.send(f"✅ Conflicts resolved and PR #{pr_number} merged!")
+            else:
+                detail = (result.get("message") or "unknown error")[:200]
+                await channel.send(
+                    f"❌ Merge still failing after conflict resolution: {detail}\nManual merge required."
+                )
+            return
+        if state in ("failed", "cancelled", "expired"):
+            await channel.send("❌ Agent couldn't resolve conflicts. Manual intervention needed.")
+            return
+    return
+
+
+async def merge_with_conflict_resolution(
+    owner: str, repo: str, pr_number: int, channel, merge_method: str = "squash"
+) -> dict:
+    """Merge. A stale base is updated in place. A real conflict goes to the agent on the same branch."""
+    github = GitHubClient()
+    try:
+        result = await github.merge_pr_safe(owner, repo, pr_number, merge_method)
+        if result.get("merged") or not is_merge_conflict(result):
+            return result
+        if channel is None:
+            return result
+        await channel.send("🔄 Resolving conflicts...")
+        updated = await github.update_branch(owner, repo, pr_number)
+        if updated.get("ok"):
+            await _settle_branch_update(github, owner, repo, pr_number, updated.get("head_sha") or "")
+            result = await github.merge_pr_safe(
+                owner, repo, pr_number, merge_method, ignore_mergeable=True
+            )
+            if result.get("merged"):
+                await channel.send("✅ Rebased and merged!")
+                return {**result, "announced": True}
+        await channel.send("⚠️ Auto-rebase failed — launching agent to resolve conflicts...")
+        info = await github.get_pr_info(owner, repo, pr_number)
+        branch = info.get("branch") or ""
+        if not branch:
+            await channel.send("❌ Merge still failing after conflict resolution: PR has no head branch.\nManual merge required.")
+            return {"merged": False, "announced": True, "message": "PR has no head branch"}
+        try:
+            launched = await cursor.launch_agent(
+                f"{owner}/{repo}",
+                conflict_prompt(branch),
+                branch=branch,
+            )
+        except Exception as exc:
+            logger.exception("conflict agent launch failed pr=%s", pr_number)
+            await channel.send(
+                f"❌ Merge still failing after conflict resolution: {str(exc)[:200]}\nManual merge required."
+            )
+            return {"merged": False, "announced": True, "message": str(exc)}
+        try:
+            await _remember_agent(owner, repo, pr_number, launched["agent_id"])
+        except Exception:
+            logger.warning("could not store conflict agent id", exc_info=True)
+        task = asyncio.create_task(
+            monitor_conflict_resolution(launched["agent_id"], owner, repo, pr_number, channel)
+        )
+        _conflict_tasks.add(task)
+        task.add_done_callback(_conflict_tasks.discard)
+        return {"merged": False, "announced": True, "message": "agent resolving conflicts", "agent_id": launched["agent_id"]}
+    finally:
+        await github.close()
+
+
 async def _merge_pr(interaction: discord.Interaction, pr_url: str | None) -> None:
     parsed = parse_pr_url(pr_url or "")
     if not parsed:
         await interaction.followup.send("No PR URL available.", ephemeral=True)
         return
     owner, repo, pr_num = parsed
-    result = await GitHubClient().merge_pr_safe(owner, repo, pr_num)
+    result = await merge_with_conflict_resolution(owner, repo, pr_num, interaction.channel)
+    if result.get("announced"):
+        return
     if result.get("merged"):
         await interaction.followup.send(f"✅ PR #{pr_num} merged!")
     else:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
@@ -475,6 +476,119 @@ async def test_merge_conflict_stays_a_sentence():
     assert result["merged"] is False
     assert "merge conflicts" in result["message"]
     assert "documentation_url" not in result["message"]
+
+
+async def test_update_branch_sends_head_sha():
+    seen = {}
+
+    def handler(request: httpx.Request) -> Response:
+        if request.method == "GET":
+            return Response(200, json={"head": {"sha": "abc123", "ref": "feature/x"}, "draft": False})
+        seen["body"] = json.loads(request.content.decode())
+        seen["path"] = request.url.path
+        return Response(202, json={"message": "Updating pull request branch.", "url": "https://api.github.com"})
+
+    gh = GitHubClient(token="fake", owner="o", repo="r")
+    await gh._client.aclose()
+    gh._client = httpx.AsyncClient(base_url="https://api.github.com", transport=MockTransport(handler))
+    result = await gh.update_branch("o", "r", 60)
+    await gh.close()
+    assert result["ok"] is True
+    assert seen["path"].endswith("/pulls/60/update-branch")
+    assert seen["body"] == {"expected_head_sha": "abc123"}
+
+
+async def test_stale_base_rebases_then_merges(monkeypatch):
+    sent = []
+
+    class Channel:
+        async def send(self, text):
+            sent.append(text)
+
+    class FakeGH:
+        async def merge_pr_safe(self, owner, repo, number, method="squash", ignore_mergeable=False):
+            if ignore_mergeable:
+                return {"merged": True, "message": "merged"}
+            return {
+                "merged": False,
+                "message": "This pull request has merge conflicts with the base branch.",
+            }
+
+        async def update_branch(self, owner, repo, number):
+            return {"ok": True, "head_sha": "old", "message": ""}
+
+        async def get_pr_info(self, owner, repo, number):
+            return {"head_sha": "new", "mergeable": True, "branch": "feature/1-password-reset"}
+
+        async def close(self):
+            return None
+
+    async def _no_sleep(_seconds):
+        return None
+
+    monkeypatch.setattr("app.discord.views.GitHubClient", lambda *a, **k: FakeGH())
+    monkeypatch.setattr("app.discord.views.asyncio.sleep", _no_sleep)
+    from app.discord.views import merge_with_conflict_resolution
+
+    result = await merge_with_conflict_resolution("o", "r", 60, Channel())
+    assert result["merged"] is True
+    assert result["announced"] is True
+    assert any("Resolving conflicts" in line for line in sent)
+    assert any("Rebased and merged" in line for line in sent)
+    assert not any("launching agent" in line for line in sent)
+
+
+async def test_real_conflict_launches_agent_on_same_branch(monkeypatch):
+    sent = []
+    launched = {}
+
+    class Channel:
+        async def send(self, text):
+            sent.append(text)
+
+    class FakeGH:
+        async def merge_pr_safe(self, owner, repo, number, method="squash", ignore_mergeable=False):
+            return {
+                "merged": False,
+                "message": "This pull request has merge conflicts with the base branch.",
+            }
+
+        async def update_branch(self, owner, repo, number):
+            return {"ok": False, "head_sha": "old", "message": "merge conflict"}
+
+        async def get_pr_info(self, owner, repo, number):
+            return {"head_sha": "old", "mergeable": False, "branch": "feature/1-password-reset"}
+
+        async def close(self):
+            return None
+
+    async def fake_launch(repo, prompt, model=None, branch=None):
+        launched["repo"] = repo
+        launched["branch"] = branch
+        launched["prompt"] = prompt
+        return {"agent_id": "bc-conflict"}
+
+    async def fake_monitor(*args, **kwargs):
+        launched["monitored"] = args[0] if args else kwargs.get("agent_id")
+
+    async def fake_remember(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr("app.discord.views.GitHubClient", lambda *a, **k: FakeGH())
+    monkeypatch.setattr("app.discord.views.cursor.launch_agent", fake_launch)
+    monkeypatch.setattr("app.discord.views.monitor_conflict_resolution", fake_monitor)
+    monkeypatch.setattr("app.discord.views._remember_agent", fake_remember)
+    from app.discord.views import merge_with_conflict_resolution
+
+    result = await merge_with_conflict_resolution("o", "r", 60, Channel())
+    await asyncio.sleep(0)
+    assert result["announced"] is True
+    assert result["agent_id"] == "bc-conflict"
+    assert launched["branch"] == "feature/1-password-reset"
+    assert "Do NOT open a new PR" in launched["prompt"]
+    assert "git push --force origin feature/1-password-reset" in launched["prompt"]
+    assert any("launching agent" in line for line in sent)
+    assert launched["monitored"] == "bc-conflict"
 
 
 if __name__ == "__main__":

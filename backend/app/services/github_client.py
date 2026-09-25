@@ -209,10 +209,31 @@ class GitHubClient:
             return {"merged": False, "message": errors[0].get("message", "Could not mark the pull request ready")}
         return None
 
-    async def merge_pr_safe(self, owner: str, repo: str, pr_number: int, merge_method: str = "squash") -> dict:
+    async def update_branch(self, owner: str, repo: str, pr_number: int) -> dict:
+        """Merge the base branch into the PR head. Works when the base is stale and there is no real conflict."""
+        info = await self.get_pr_info(owner, repo, pr_number)
+        sha = info.get("head_sha") or ""
+        if not sha:
+            return {"ok": False, "message": "Pull request has no head SHA", "head_sha": ""}
+        response = await self._client.put(
+            f"/repos/{owner}/{repo}/pulls/{pr_number}/update-branch",
+            json={"expected_head_sha": sha},
+        )
+        if response.status_code in (200, 202):
+            return {"ok": True, "message": "", "head_sha": sha}
+        return {"ok": False, "message": _github_error(response.text), "head_sha": sha}
+
+    async def merge_pr_safe(
+        self,
+        owner: str,
+        repo: str,
+        pr_number: int,
+        merge_method: str = "squash",
+        ignore_mergeable: bool = False,
+    ) -> dict:
         """Mark ready if the pull request is a draft, then merge."""
         info = await self.get_pr_info(owner, repo, pr_number)
-        if info.get("mergeable") is False:
+        if info.get("mergeable") is False and not ignore_mergeable:
             return {
                 "merged": False,
                 "message": (
@@ -242,6 +263,10 @@ class GitHubClient:
     async def post_pr_review(self, pr_number: int, review_body: str) -> dict:
         result = await self.post_comment(self.owner, self.repo, pr_number, review_body)
         return {"comment_id": result.get("id"), "url": result.get("html_url")}
+
+
+def is_merge_conflict(result: dict) -> bool:
+    return "merge conflict" in (result.get("message") or "").lower()
 
 
 def _github_error(body: str) -> str:
