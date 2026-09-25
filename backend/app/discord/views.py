@@ -226,7 +226,7 @@ async def _run_button(interaction: discord.Interaction, work, label: str = "", e
             _release(_busy_key(label, entity_id))
         await interaction.followup.send(f"⚠️ Failed: {exc}", ephemeral=True)
         return
-    if not guarded:
+    if not guarded and label != "View Details":
         await _disable_buttons(interaction)
 
 
