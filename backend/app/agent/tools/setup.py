@@ -6,7 +6,7 @@ import json
 
 from app.agent.tools.registry import ToolDef, ToolRegistry
 from app.services import cache as cache_svc
-from app.services.ast_parser import build_graph
+from app.services.graph_builder import build_graph
 from app.services.blast_radius import trace
 from app.services.diff_parser import parse_diff
 from app.services.github_client import GitHubClient

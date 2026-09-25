@@ -9,6 +9,7 @@ import re
 import httpx
 
 from app.config import settings
+from app.services.graph_builder import is_supported_source
 
 
 class GitHubClient:
@@ -137,7 +138,7 @@ class GitHubClient:
             p = item["path"]
             if path_filter and not p.startswith(path_filter):
                 continue
-            if not p.endswith(".py"):
+            if not is_supported_source(p):
                 continue
             out.append(p)
         return out

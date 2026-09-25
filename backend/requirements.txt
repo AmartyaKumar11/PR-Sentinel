@@ -12,3 +12,7 @@ pytest>=8.0.0
 pytest-asyncio>=0.24.0
 pytest-timeout>=2.3.0
 discord.py>=2.4.0
+# tree-sitter-languages has no wheel here and breaks on tree-sitter>=0.23.
+# language-pack is the maintained drop-in with the same get_parser() API.
+tree-sitter>=0.23.0
+tree-sitter-language-pack>=1.10.0
