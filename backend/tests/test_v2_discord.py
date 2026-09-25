@@ -92,6 +92,17 @@ def test_parse_pr_url():
     assert parse_pr_url("nope") is None
 
 
+def test_pr_url_comes_from_the_original_task():
+    from app.discord.views import pr_url_for_task
+
+    assert pr_url_for_task({"repo": "o/r", "pr_number": 60}) == "https://github.com/o/r/pull/60"
+    assert pr_url_for_task({"pr_url": "https://github.com/o/r/pull/7", "pr_number": 60}) == (
+        "https://github.com/o/r/pull/7"
+    )
+    assert pr_url_for_task({}) is None
+    assert pr_url_for_task(None) is None
+
+
 def test_component_parts():
     from app.discord.views import component_parts
 

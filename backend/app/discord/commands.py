@@ -8,7 +8,7 @@ from discord import app_commands
 
 from app.config import settings
 from app.discord.conversation import format_prompt_history
-from app.discord.views import merge_with_conflict_resolution, owner_only
+from app.discord.views import merge_with_conflict_resolution, owner_only, parse_pr_url, pr_url_for_task
 from app.database import get_db
 from app.services.cursor_client import cursor, format_status_reply, model_label
 from app.services.github_client import GitHubClient
@@ -150,20 +150,17 @@ async def setup_commands(bot):
         async def work():
             db = await get_db()
             row = await db.execute(
-                "SELECT cursor_agent_id FROM tasks WHERE cursor_agent_id IS NOT NULL "
+                "SELECT repo, pr_number FROM tasks "
+                "WHERE pr_number IS NOT NULL AND status NOT IN ('resolved', 'dismissed', 'error') "
                 "ORDER BY created_at DESC LIMIT 1"
             )
             task = await row.fetchone()
-            if not task:
-                await interaction.followup.send("No task with a PR to merge.")
-                return
-            result = await cursor.get_run_status(dict(task)["cursor_agent_id"])
-            match = _PR_URL.search(result.get("pr_url") or "")
-            if not match:
+            parsed = parse_pr_url(pr_url_for_task(dict(task) if task else None) or "")
+            if not parsed:
                 await interaction.followup.send("No PR to merge yet.")
                 return
             merge_result = await merge_with_conflict_resolution(
-                match.group(1), match.group(2), int(match.group(3)), interaction.channel
+                parsed[0], parsed[1], parsed[2], interaction.channel
             )
             if merge_result.get("announced"):
                 return

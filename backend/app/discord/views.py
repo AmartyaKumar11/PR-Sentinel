@@ -69,6 +69,19 @@ def parse_pr_url(url: str) -> tuple[str, str, int] | None:
     return match.group(1), match.group(2), int(match.group(3))
 
 
+def pr_url_for_task(task: dict | None) -> str | None:
+    """The developer's pull request. Agent runs do not open a second one."""
+    if not task:
+        return None
+    if task.get("pr_url"):
+        return task["pr_url"]
+    repo = task.get("repo")
+    number = task.get("pr_number")
+    if repo and number:
+        return f"https://github.com/{repo}/pull/{number}"
+    return None
+
+
 def _tag(view: discord.ui.View, task_id: str) -> None:
     for child in view.children:
         label = getattr(child, "label", "") or ""
@@ -521,7 +534,7 @@ async def _dispatch_label(label: str, entity_id: str, interaction: discord.Inter
     elif label == "Analyze with PR Sentinel":
         await _analyze_pending(interaction, entity_id)
     elif label in ("Merge", "Merge Anyway"):
-        await _merge_pr(interaction, _pr_url_from_message(interaction))
+        await _merge_pr(interaction, entity_id)
     elif label == "Reject Fix":
         parsed = parse_pr_url(_pr_url_from_message(interaction) or "")
         if parsed:
@@ -540,17 +553,17 @@ async def _dispatch_label(label: str, entity_id: str, interaction: discord.Inter
 async def _override_click(interaction: discord.Interaction, entity_id: str) -> None:
     if not await owner_only(interaction):
         return
-    pr_url = _pr_url_from_message(interaction)
+    task = await get_task(await get_db(), entity_id)
+    parsed = parse_pr_url(pr_url_for_task(task) or "")
     if entity_id not in _override_ready:
         _override_ready.add(entity_id)
-        parsed = parse_pr_url(pr_url or "")
         number = parsed[2] if parsed else "?"
         await interaction.response.send_message(
             f"Are you sure? This will merge PR #{number}. Click Override & Merge again to confirm.",
             ephemeral=True,
         )
         return
-    await _run_button(interaction, lambda: _merge_pr(interaction, pr_url), "Merge", entity_id)
+    await _run_button(interaction, lambda: _merge_pr(interaction, entity_id), "Merge", entity_id)
 
 
 async def _approve_fix(interaction: discord.Interaction, task_id: str) -> None:
@@ -753,8 +766,9 @@ async def merge_with_conflict_resolution(
         await github.close()
 
 
-async def _merge_pr(interaction: discord.Interaction, pr_url: str | None) -> None:
-    parsed = parse_pr_url(pr_url or "")
+async def _merge_pr(interaction: discord.Interaction, task_id: str) -> None:
+    task = await get_task(await get_db(), task_id)
+    parsed = parse_pr_url(pr_url_for_task(task) or "")
     if not parsed:
         await interaction.followup.send("No PR URL available.", ephemeral=True)
         return
@@ -856,11 +870,11 @@ async def _store_gate(task_id: str, status: dict) -> dict:
 
     from app.services.quality_gate import validate
 
-    parsed = parse_pr_url(status.get("pr_url") or "")
-    if not parsed:
-        raise RuntimeError("Fix PR URL is missing")
     db = await get_db()
     task = await get_task(db, task_id)
+    parsed = parse_pr_url(pr_url_for_task(task) or "")
+    if not parsed:
+        raise RuntimeError("Fix PR URL is missing")
     diag = json_loads((task or {}).get("diagnosis_json"))
     github = GitHubClient()
     try:
