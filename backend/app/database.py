@@ -114,6 +114,7 @@ async def _migrate_columns(db: aiosqlite.Connection) -> None:
         ("requirement_scores", "TEXT"),
         ("cursor_agent_id", "TEXT"),
         ("quality_gate_json", "TEXT"),
+        ("fix_attempts", "INTEGER"),
     ):
         if col not in existing:
             await db.execute(f"ALTER TABLE tasks ADD COLUMN {col} {decl}")

@@ -589,8 +589,8 @@ async def _launch(task: dict | None, params: dict, channel=None) -> str:
     )
     db = await get_db()
     await db.execute(
-        "UPDATE tasks SET cursor_agent_id = ? WHERE id = ?",
-        (result["agent_id"], task["id"]),
+        "UPDATE tasks SET cursor_agent_id = ?, fix_attempts = ? WHERE id = ?",
+        (result["agent_id"], 1, task["id"]),
     )
     await db.commit()
     await accept_task(db, task["id"])

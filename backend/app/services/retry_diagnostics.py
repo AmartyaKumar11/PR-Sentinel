@@ -120,8 +120,41 @@ async def gather_failure_context(
             await gh.close()
 
 
-async def build_retry_prompt(context: dict, deepseek: LLMClient | None = None) -> str:
-    """Ask DeepSeek for a new agent prompt that names the actual failure."""
+def build_fallback_retry_prompt(gate_result: dict, original_prompt: str) -> str:
+    """Used when the diagnostic model call fails. Still names the unmet requirements."""
+    parts = ["Your previous fix did not pass validation.\n"]
+    alignment = gate_result.get("requirement_alignment") or {}
+    unmet = {key: value for key, value in alignment.items() if value < 0.6}
+    met = {key: value for key, value in alignment.items() if value >= 0.6}
+    if unmet:
+        parts.append("REQUIREMENTS NOT YET ADDRESSED:")
+        for req, score in unmet.items():
+            parts.append(f"  - {req} (score: {score:.2f})")
+        parts.append("")
+    if met:
+        parts.append("REQUIREMENTS ALREADY MET (keep these):")
+        for req, score in met.items():
+            parts.append(f"  - {req} (score: {score:.2f})")
+        parts.append("")
+    if gate_result.get("ci_status") == "failed":
+        parts.append(
+            "CI TESTS FAILED. Run the test suite, read the "
+            "failure output, and fix your code to pass all tests."
+        )
+        parts.append("")
+    parts.append("ORIGINAL INSTRUCTIONS (still apply):")
+    parts.append(original_prompt or "")
+    return "\n".join(parts)
+
+
+async def build_retry_prompt(
+    task_id: str,
+    gate_result: dict,
+    fix_pr_url: str,
+    deepseek: LLMClient | None = None,
+) -> str:
+    """Diagnose the failed fix, then return the next agent prompt."""
+    context = await gather_failure_context(task_id, gate_result, fix_pr_url)
     deepseek = deepseek or LLMClient()
     packed = dict(context)
     diff = packed.get("fix_diff") or ""
@@ -132,4 +165,7 @@ async def build_retry_prompt(context: dict, deepseek: LLMClient | None = None) -
         + json.dumps(packed, indent=2, default=str)
     )
     text = await deepseek.chat(RETRY_ANALYSIS_PROMPT, [{"role": "user", "content": user}])
-    return (text or "").strip()
+    cleaned = (text or "").strip()
+    if not cleaned:
+        raise RuntimeError("DeepSeek returned an empty retry prompt")
+    return cleaned

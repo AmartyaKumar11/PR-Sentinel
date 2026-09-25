@@ -24,6 +24,14 @@ from app.services.task_manager import (
 logger = logging.getLogger(__name__)
 
 _PR_URL = re.compile(r"github\.com/([^/]+)/([^/]+)/pull/(\d+)")
+MAX_ATTEMPTS = 3
+
+
+def refining_message(attempt: int) -> str | None:
+    """Discord line for the next try. None means the user can see the failure."""
+    if attempt >= MAX_ATTEMPTS:
+        return None
+    return f"🔄 Refining fix (attempt {attempt + 1}/{MAX_ATTEMPTS})..."
 
 
 async def owner_only(interaction: discord.Interaction) -> bool:
@@ -239,10 +247,14 @@ async def monitor_agent(agent_id: str, channel, task_id: str) -> None:
     from app.discord.bot import bot
 
     pr_number = "?"
+    attempt = 1
+    current_agent_id = agent_id
     try:
         task = await get_task(await get_db(), task_id)
         if task and task.get("pr_number") is not None:
             pr_number = task["pr_number"]
+        if task and task.get("fix_attempts"):
+            attempt = int(task["fix_attempts"])
     except Exception:
         logger.warning("progress pr lookup failed", exc_info=True)
     msg = None
@@ -253,21 +265,19 @@ async def monitor_agent(agent_id: str, channel, task_id: str) -> None:
 
     failures = 0
     max_failures = 10
-    # After a follow-up, Cursor can still report the previous FINISHED for a few polls.
-    ignore_completed = 0
     while failures < max_failures:
         await asyncio.sleep(15)
         try:
-            status = await cursor.get_run_status(agent_id)
+            status = await cursor.get_run_status(current_agent_id)
             failures = 0
         except Exception as exc:
             failures += 1
-            logger.exception("cursor status failed agent=%s (%s/%s)", agent_id, failures, max_failures)
+            logger.exception("cursor status failed agent=%s (%s/%s)", current_agent_id, failures, max_failures)
             if failures >= max_failures:
                 await _edit_or_send(
                     msg,
                     channel,
-                    f"⚠️ Lost contact with agent `{agent_id}` "
+                    f"⚠️ Lost contact with agent `{current_agent_id}` "
                     f"after {max_failures} failed checks. "
                     f"Last error: {exc}\n"
                     f"Check cursor.com/agents for its status.",
@@ -275,11 +285,6 @@ async def monitor_agent(agent_id: str, channel, task_id: str) -> None:
                 return
             continue
         state = status.get("status")
-        if state == "running":
-            ignore_completed = 0
-        if state == "completed" and ignore_completed:
-            ignore_completed -= 1
-            continue
         if state == "completed":
             if not status.get("pr_url"):
                 await bot.send_agent_complete(task_id, status, message=msg)
@@ -294,22 +299,24 @@ async def monitor_agent(agent_id: str, channel, task_id: str) -> None:
                     "ci_status": "failed",
                     "summary": f"Quality gate failed: {exc}",
                 }
-            if not gate.get("passed") and await _retry_failed_gate(task_id, status, gate, agent_id):
-                ignore_completed = 4
-                await _edit_or_send(
-                    msg,
-                    channel,
-                    f"🔧 Gate failed on PR #{pr_number}. "
-                    "Retrying with a diagnosis of what broke.",
-                )
-                continue
-            await bot.send_gate_result(task_id, status, gate, message=msg)
+            if gate.get("passed"):
+                await bot.send_gate_result(task_id, status, gate, message=msg)
+                return
+            notice = refining_message(attempt)
+            if notice:
+                launched = await _launch_retry(channel, task_id, status, gate, attempt, notice)
+                if launched:
+                    attempt += 1
+                    current_agent_id = launched
+                    failures = 0
+                    continue
+            await _send_exhausted(channel, task_id, status, gate)
             return
         if state in ("failed", "cancelled", "expired"):
             await _edit_or_send(
                 msg,
                 channel,
-                f"⚠️ Agent `{agent_id}` {state}."
+                f"⚠️ Agent `{current_agent_id}` {state}."
                 f"\n{status.get('result_text') or status.get('last_activity') or 'No details.'}",
             )
             return
@@ -348,6 +355,25 @@ class ReviewView(discord.ui.View):
 
     @discord.ui.button(label="Re-run Agent", style=discord.ButtonStyle.blurple, emoji="🔄")
     async def rerun(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await handle_component(interaction)
+
+
+class OverrideView(discord.ui.View):
+    """Shown only after every automatic retry has failed."""
+
+    def __init__(self, task_id: str, pr_url: str | None = None):
+        super().__init__(timeout=None)
+        self.task_id = task_id
+        self.pr_url = pr_url
+        self.confirmed = False
+        _tag(self, task_id)
+
+    @discord.ui.button(label="Override & Merge", style=discord.ButtonStyle.green, emoji="⚠️")
+    async def override(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await handle_component(interaction)
+
+    @discord.ui.button(label="Dismiss", style=discord.ButtonStyle.red, emoji="🗑️")
+    async def dismiss(self, interaction: discord.Interaction, button: discord.ui.Button):
         await handle_component(interaction)
 
 
@@ -468,8 +494,8 @@ async def _approve_fix(interaction: discord.Interaction, task_id: str) -> None:
         branch=f"pr-sentinel/fix-{task['pr_number']}",
     )
     await db.execute(
-        "UPDATE tasks SET cursor_agent_id = ? WHERE id = ?",
-        (result["agent_id"], task_id),
+        "UPDATE tasks SET cursor_agent_id = ?, fix_attempts = ? WHERE id = ?",
+        (result["agent_id"], 1, task_id),
     )
     await db.commit()
     await interaction.followup.send(
@@ -566,32 +592,75 @@ async def _dismiss(interaction: discord.Interaction, task_id: str) -> None:
     await interaction.followup.send("Task dismissed.", ephemeral=True)
 
 
-async def _retry_failed_gate(task_id: str, status: dict, gate: dict, agent_id: str) -> bool:
-    """One follow-up per failed gate, up to two. The prompt names the actual failure."""
-    import json
-
-    attempt = int(gate.get("retry_attempt") or 0)
-    if attempt >= 2:
-        return False
-    from app.services.retry_diagnostics import build_retry_prompt, gather_failure_context
-
+async def close_fix_pr(pr_url: str) -> None:
+    """Close the rejected fix pull request and delete its branch."""
+    parsed = parse_pr_url(pr_url)
+    if not parsed:
+        return
+    owner, repo, number = parsed
+    github = GitHubClient()
     try:
-        context = await gather_failure_context(task_id, gate, status.get("pr_url") or "")
-        prompt = await build_retry_prompt(context)
-        if not prompt:
-            return False
-        gate["retry_attempt"] = attempt + 1
-        db = await get_db()
-        await db.execute(
-            "UPDATE tasks SET quality_gate_json = ?, composer_prompt = ? WHERE id = ?",
-            (json.dumps(gate), prompt, task_id),
+        info = await github.get_pr_info(owner, repo, number)
+        await github.close_pr(owner, repo, number)
+        branch = info.get("branch") or ""
+        if branch.startswith("pr-sentinel/fix-"):
+            await github._client.delete(f"/repos/{owner}/{repo}/git/refs/heads/{branch}")
+    finally:
+        await github.close()
+
+
+async def _launch_retry(channel, task_id: str, status: dict, gate: dict, attempt: int, notice: str) -> str | None:
+    """Start the next agent. Returns the new agent id, or None if the launch itself failed."""
+    from app.services.llm_client import LLMClient
+    from app.services.retry_diagnostics import build_fallback_retry_prompt, build_retry_prompt
+
+    db = await get_db()
+    task = await get_task(db, task_id)
+    if not task:
+        return None
+    try:
+        retry_prompt = await build_retry_prompt(
+            task_id, gate, status.get("pr_url") or "", LLMClient()
         )
-        await db.commit()
-        await cursor.resume_agent(agent_id, prompt)
-    except Exception:
+    except Exception as exc:
         logger.exception("retry diagnosis failed task=%s", task_id)
-        return False
-    return True
+        retry_prompt = build_fallback_retry_prompt(gate, task.get("composer_prompt") or "")
+        await channel.send(
+            f"⚠️ Detailed analysis failed ({str(exc)[:100]}), retrying with simplified feedback..."
+        )
+    if status.get("pr_url"):
+        try:
+            await close_fix_pr(status["pr_url"])
+        except Exception:
+            logger.warning("close fix pr failed", exc_info=True)
+    await channel.send(notice)
+    try:
+        result = await cursor.launch_agent(
+            repo_full_name=task["repo"],
+            prompt=retry_prompt,
+            branch=f"pr-sentinel/fix-{task['pr_number']}-v{attempt + 1}",
+        )
+    except Exception:
+        logger.exception("retry launch failed task=%s", task_id)
+        return None
+    next_attempt = attempt + 1
+    await db.execute(
+        "UPDATE tasks SET cursor_agent_id = ?, fix_attempts = ?, composer_prompt = ? WHERE id = ?",
+        (result["agent_id"], next_attempt, retry_prompt, task_id),
+    )
+    await db.commit()
+    return result["agent_id"]
+
+
+async def _send_exhausted(channel, task_id: str, status: dict, gate: dict) -> None:
+    summary = gate.get("summary") or "unknown"
+    await channel.send(
+        f"⚠️ Fix didn't pass after {MAX_ATTEMPTS} attempts.\n**Last issue:** {summary}"
+    )
+    await channel.send(
+        "You can override and merge, or dismiss.",
+        view=OverrideView(task_id=task_id, pr_url=status.get("pr_url")),
+    )
 
 
 async def _store_gate(task_id: str, status: dict) -> dict:
@@ -604,7 +673,6 @@ async def _store_gate(task_id: str, status: dict) -> dict:
         raise RuntimeError("Fix PR URL is missing")
     db = await get_db()
     task = await get_task(db, task_id)
-    previous = json_loads((task or {}).get("quality_gate_json"))
     diag = json_loads((task or {}).get("diagnosis_json"))
     github = GitHubClient()
     try:
@@ -622,7 +690,6 @@ async def _store_gate(task_id: str, status: dict) -> dict:
             diag,
             github=github,
         )
-        gate["retry_attempt"] = int(previous.get("retry_attempt") or 0)
     finally:
         await github.close()
     await db.execute(

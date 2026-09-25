@@ -4,6 +4,7 @@ import pytest
 
 from app.services.retry_diagnostics import (
     RETRY_ANALYSIS_PROMPT,
+    build_fallback_retry_prompt,
     build_retry_prompt,
     gather_failure_context,
 )
@@ -28,12 +29,37 @@ class _FakeLLM:
 
 
 @pytest.mark.asyncio
-async def test_build_retry_prompt_returns_the_model_text():
+async def test_build_retry_prompt_returns_the_model_text(monkeypatch):
+    async def _gather(*_args, **_kwargs):
+        return {"fix_diff": "diff", "unmet_requirements": {"qty": 0.2}}
+
+    monkeypatch.setattr("app.services.retry_diagnostics.gather_failure_context", _gather)
     llm = _FakeLLM()
-    text = await build_retry_prompt({"fix_diff": "diff", "unmet_requirements": {"qty": 0.2}}, llm)
+    text = await build_retry_prompt("task-1", {}, "https://github.com/o/r/pull/1", llm)
     assert text.startswith("Keep create_order")
     assert llm.system is RETRY_ANALYSIS_PROMPT
     assert "qty" in llm.user
+
+
+def test_fallback_names_unmet_requirements():
+    text = build_fallback_retry_prompt(
+        {
+            "ci_status": "passed",
+            "requirement_alignment": {"delta charge": 0.12, "owner token": 0.96},
+        },
+        "Charge only the price difference.",
+    )
+    assert "delta charge (score: 0.12)" in text
+    assert "owner token (score: 0.96)" in text
+    assert "Charge only the price difference." in text
+
+
+def test_refining_message_counts_to_three():
+    from app.discord.views import refining_message
+
+    assert refining_message(1) == "🔄 Refining fix (attempt 2/3)..."
+    assert refining_message(2) == "🔄 Refining fix (attempt 3/3)..."
+    assert refining_message(3) is None
 
 
 class _Resp:
