@@ -502,11 +502,7 @@ class AgentOrchestrator:
         if auto and triage.get("action") != "skip":
             from app.services.cursor_client import cursor
 
-            result = await cursor.launch_agent(
-                repo_full_name=f"{owner}/{repo}",
-                prompt=composer,
-                branch=f"pr-sentinel/fix-{pr_number}",
-            )
+            result = await cursor.launch_on_pull(f"{owner}/{repo}", pr_number, composer)
             db = await get_db()
             await db.execute(
                 "UPDATE tasks SET cursor_agent_id = ? WHERE id = ?",

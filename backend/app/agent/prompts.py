@@ -59,7 +59,7 @@ Only one action block per response. The handler executes it and appends the resu
 
 Agent control:
   {"action": "launch_agent", "params": {"prompt": "...", "model": "...", "branch": "..."}}
-    Launch a Cursor Cloud Agent. prompt is the fix instructions. model is optional (uses current default). branch is optional (defaults to pr-sentinel/fix-{pr_number}).
+    Launch a Cursor Cloud Agent on the pull request's current head branch. prompt is the fix instructions. model is optional (uses current default). branch is optional; omit it so commits land on the open PR. Do not ask for a new branch or a new pull request.
   {"action": "stop_agent", "params": {}}
     Cancel the currently running agent.
   {"action": "resume_agent", "params": {"message": "..."}}

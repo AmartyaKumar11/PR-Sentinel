@@ -165,20 +165,28 @@ def _repo_url(full_name: str) -> str:
 
 
 def launch_body(repo_full_name: str, prompt: str, model: str | None, branch: str | None) -> dict:
-    """Omit model when it is auto. Cursor then uses the account default."""
+    """Omit model when it is auto. Cursor then uses the account default.
+
+    The pull request already exists. Commits land on that head branch.
+    """
     text = prompt or ""
     if branch:
         text += (
-            f"\n\nPush the fix on branch `{branch}` and open a pull request. "
-            "Include [pr-sentinel] in the pull request body."
+            f"\n\nPush your fix commits to the existing branch `{branch}`. "
+            "Do NOT create a new branch. Do NOT open a new pull request. "
+            "The PR already exists. "
+            "Start each commit message with [pr-sentinel-fix]."
         )
+    source = {"repository": _repo_url(repo_full_name)}
+    target: dict = {"skipReviewerRequest": True}
+    if branch:
+        source["ref"] = branch
+        target["branchName"] = branch
     body = {
         "prompt": {"text": text or "Continue."},
-        "source": {"repository": _repo_url(repo_full_name)},
-        "target": {"autoCreatePr": True, "skipReviewerRequest": True},
+        "source": source,
+        "target": target,
     }
-    if branch:
-        body["target"]["branchName"] = branch
     if model and model != "auto":
         body["model"] = model
     return body
@@ -219,9 +227,35 @@ class CursorClient:
             "status": public_status(data.get("status")),
             "model": "auto" if not model or model == "auto" else model,
             "repo": repo_full_name,
-            "branch": target.get("branchName"),
+            "branch": target.get("branchName") or branch,
             "pr_url": target.get("prUrl"),
         }
+
+    async def launch_on_pull(
+        self,
+        repo_full_name: str,
+        pr_number: int,
+        prompt: str,
+        model: str | None = None,
+    ) -> dict:
+        """Push the fix onto the pull request's current head branch."""
+        from app.services.github_client import GitHubClient
+
+        owner, name = repo_full_name.split("/", 1)
+        github = GitHubClient()
+        try:
+            info = await github.get_pr_info(owner, name, int(pr_number))
+        finally:
+            await github.close()
+        branch = info.get("branch") or ""
+        if not branch:
+            raise RuntimeError(f"PR #{pr_number} has no head branch")
+        result = await self.launch_agent(repo_full_name, prompt, model=model, branch=branch)
+        result["branch"] = branch
+        result["head_sha"] = info.get("head_sha") or ""
+        result["pr_url"] = f"https://github.com/{repo_full_name}/pull/{int(pr_number)}"
+        result["pr_number"] = int(pr_number)
+        return result
 
     async def get_run_status(self, agent_id: str) -> dict:
         response = await self._client.get(f"/agents/{agent_id}")

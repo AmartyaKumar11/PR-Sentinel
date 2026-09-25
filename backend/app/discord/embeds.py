@@ -104,6 +104,8 @@ def build_agent_result_embed(result: dict) -> discord.Embed:
     )
     if result.get("branch"):
         embed.add_field(name="Branch", value=f"`{result['branch']}`", inline=True)
+    if result.get("pushed_to_pr"):
+        embed.description = f"Agent pushed fixes to PR #{result['pushed_to_pr']}"
     if result.get("pr_url"):
         embed.add_field(name="Pull Request", value=result["pr_url"], inline=True)
     if result.get("token_usage"):

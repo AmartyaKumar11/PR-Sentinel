@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import re
 
 import httpx
@@ -87,6 +88,7 @@ class GitHubClient:
             "state": pr.get("state", ""),
             "draft": bool(pr.get("draft")),
             "node_id": pr.get("node_id") or "",
+            "mergeable": pr.get("mergeable"),
         }
 
     async def get_linked_issue(self, owner: str, repo: str, pr_number: int) -> dict | None:
@@ -183,7 +185,7 @@ class GitHubClient:
             json={"merge_method": merge_method},
         )
         if r.status_code >= 400:
-            return {"merged": False, "message": r.text[:300]}
+            return {"merged": False, "message": _github_error(r.text)}
         data = r.json()
         return {"merged": bool(data.get("merged")), "message": data.get("message", "")}
 
@@ -210,6 +212,14 @@ class GitHubClient:
     async def merge_pr_safe(self, owner: str, repo: str, pr_number: int, merge_method: str = "squash") -> dict:
         """Mark ready if the pull request is a draft, then merge."""
         info = await self.get_pr_info(owner, repo, pr_number)
+        if info.get("mergeable") is False:
+            return {
+                "merged": False,
+                "message": (
+                    "This pull request has merge conflicts with the base branch. "
+                    "GitHub will not merge it until those conflicts are resolved."
+                ),
+            }
         if info.get("draft"):
             node_id = info.get("node_id")
             if not node_id:
@@ -232,6 +242,19 @@ class GitHubClient:
     async def post_pr_review(self, pr_number: int, review_body: str) -> dict:
         result = await self.post_comment(self.owner, self.repo, pr_number, review_body)
         return {"comment_id": result.get("id"), "url": result.get("html_url")}
+
+
+def _github_error(body: str) -> str:
+    try:
+        message = (json.loads(body).get("message") or "").strip()
+    except json.JSONDecodeError:
+        message = body.strip()
+    if "merge conflict" in message.lower():
+        return (
+            "This pull request has merge conflicts with the base branch. "
+            "GitHub will not merge it until those conflicts are resolved."
+        )
+    return (message or "GitHub rejected the merge.")[:300]
 
 
 def _find_issue_number(body: str, branch: str) -> int | None:

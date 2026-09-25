@@ -41,9 +41,6 @@ async def github_webhook(request: Request):
         return {"skipped": True, "reason": f"Action: {action}"}
 
     pr = payload["pull_request"]
-    if sentinel_pr(pr):
-        return {"skipped": True, "reason": "PR created by PR Sentinel"}
-
     full = payload["repository"]["full_name"]
     owner, repo = full.split("/", 1)
     pr_number = pr["number"]
@@ -58,6 +55,12 @@ async def github_webhook(request: Request):
         )
         return JSONResponse({"task_id": existing["id"]}, status_code=202)
 
+    if action == "synchronize" and await _head_is_agent_fix(owner, repo, head_sha):
+        return {"skipped": True, "reason": "agent fix commit"}
+
+    if action == "opened" and sentinel_pr(pr):
+        return {"skipped": True, "reason": "PR created by PR Sentinel"}
+
     meta = _pr_meta(payload, full)
     pending = await get_pending_for_pr(db, full, pr_number)
     if pending:
@@ -68,6 +71,39 @@ async def github_webhook(request: Request):
     await save_pending(db, meta)
     asyncio.create_task(_notify_pr(meta))
     return JSONResponse({"pending_id": meta["id"]}, status_code=202)
+
+
+def is_agent_fix(message: str = "", login: str = "", name: str = "", email: str = "") -> bool:
+    """Agent commits carry a marker, or Cursor's own author. Humans do not."""
+    blob = "\n".join([message or "", login or "", name or "", email or ""]).lower()
+    if "[pr-sentinel-fix]" in blob or "cursoragent" in blob:
+        return True
+    return (login or "").lower().endswith("[bot]")
+
+
+async def _head_is_agent_fix(owner: str, repo: str, sha: str) -> bool:
+    from app.services.github_client import GitHubClient
+
+    github = GitHubClient()
+    try:
+        response = await github._client.get(f"/repos/{owner}/{repo}/commits/{sha}")
+        if response.status_code >= 400:
+            return False
+        data = response.json()
+        commit = data.get("commit") or {}
+        git_author = commit.get("author") or {}
+        login = ((data.get("author") or {}).get("login") or "")
+        return is_agent_fix(
+            commit.get("message") or "",
+            login,
+            git_author.get("name") or "",
+            git_author.get("email") or "",
+        )
+    except Exception:
+        logger.warning("agent commit check failed", exc_info=True)
+        return False
+    finally:
+        await github.close()
 
 
 def sentinel_pr(pr: dict) -> bool:

@@ -583,12 +583,17 @@ async def _launch(task: dict | None, params: dict, channel=None) -> str:
     if await _agent_running(task):
         return "Agent is already running — use /status to check progress."
     prompt = params.get("prompt") or task.get("composer_prompt") or task.get("suggested_fix") or ""
-    result = await cursor.launch_agent(
-        repo_full_name=task["repo"],
-        prompt=prompt,
-        model=params.get("model"),
-        branch=params.get("branch") or f"pr-sentinel/fix-{task['pr_number']}",
-    )
+    if params.get("branch"):
+        result = await cursor.launch_agent(
+            repo_full_name=task["repo"],
+            prompt=prompt,
+            model=params.get("model"),
+            branch=params["branch"],
+        )
+    else:
+        result = await cursor.launch_on_pull(
+            task["repo"], int(task["pr_number"]), prompt, model=params.get("model")
+        )
     db = await get_db()
     await db.execute(
         "UPDATE tasks SET cursor_agent_id = ?, fix_attempts = ? WHERE id = ?",

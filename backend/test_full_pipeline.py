@@ -145,10 +145,8 @@ async def run_agent(task: dict) -> dict:
     if not settings.CURSOR_API_KEY or "your_" in settings.CURSOR_API_KEY:
         return {"skipped": True, "detail": "SKIPPED — no Cursor API key"}
     started = time.monotonic()
-    result = await cursor.launch_agent(
-        repo_full_name=task["repo"],
-        prompt=task.get("composer_prompt") or "",
-        branch=f"pr-sentinel/fix-{task['pr_number']}",
+    result = await cursor.launch_on_pull(
+        task["repo"], int(task["pr_number"]), task.get("composer_prompt") or ""
     )
     from app.database import get_db
 

@@ -152,12 +152,14 @@ async def test_webhook_synchronize_reuses_task_id():
 def test_launch_body_omits_auto_and_maps_status():
     from app.services.cursor_client import launch_body, model_label, public_status
 
-    body = launch_body("o/r", "fix it", "auto", "pr-sentinel/fix-1")
+    body = launch_body("o/r", "fix it", "auto", "feature/password-reset")
     assert "model" not in body
     assert body["source"]["repository"] == "https://github.com/o/r"
-    assert body["target"]["branchName"] == "pr-sentinel/fix-1"
-    assert body["target"]["autoCreatePr"] is True
-    assert "[pr-sentinel]" in body["prompt"]["text"]
+    assert body["source"]["ref"] == "feature/password-reset"
+    assert body["target"]["branchName"] == "feature/password-reset"
+    assert "autoCreatePr" not in body["target"]
+    assert "Do NOT open a new pull request" in body["prompt"]["text"]
+    assert "[pr-sentinel-fix]" in body["prompt"]["text"]
     named = launch_body("o/r", "fix it", None, None)
     assert "model" not in named
     picked = launch_body("o/r", "fix it", "gpt-4o-mini", None)
@@ -167,7 +169,13 @@ def test_launch_body_omits_auto_and_maps_status():
     assert public_status("ERROR") == "failed"
 
 
-def test_sentinel_pr_signals():
+def test_agent_fix_marker_is_not_a_human_commit():
+    from app.routes.webhook import is_agent_fix
+
+    assert is_agent_fix("[pr-sentinel-fix] validate the token")
+    assert is_agent_fix("", login="cursoragent")
+    assert is_agent_fix("", email="cursoragent@cursor.com")
+    assert not is_agent_fix("Add password reset endpoint", login="AmartyaKumar11")
     from app.routes.webhook import sentinel_pr
 
     assert sentinel_pr({"head": {"ref": "pr-sentinel/fix-12"}, "body": "", "user": {"login": "me"}})
@@ -206,6 +214,28 @@ async def test_webhook_skips_sentinel_branch():
         )
     assert response.status_code == 200
     assert response.json()["reason"] == "PR created by PR Sentinel"
+
+
+@pytest.mark.asyncio
+async def test_webhook_skips_rediagnosis_for_agent_commit(monkeypatch):
+    async def _agent(*_args, **_kwargs):
+        return True
+
+    monkeypatch.setattr("app.routes.webhook._head_is_agent_fix", _agent)
+    body = _pr_payload(action="synchronize", pr=88001, sha="agentsha")
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/api/webhook/github",
+            content=body,
+            headers={
+                "Content-Type": "application/json",
+                "X-GitHub-Event": "pull_request",
+                "X-Hub-Signature-256": _sign(body),
+            },
+        )
+    assert response.status_code == 200
+    assert response.json()["reason"] == "agent fix commit"
 
 
 def test_run_status_keeps_activity():
@@ -426,6 +456,25 @@ async def test_merge_pr_safe_marks_draft_ready(monkeypatch):
     await gh.close()
     assert result["merged"] is True
     assert "POST /graphql" in seen
+
+
+async def test_merge_conflict_stays_a_sentence():
+    def handler(request: httpx.Request) -> Response:
+        if request.method == "GET":
+            return Response(200, json={"draft": False, "mergeable": False, "title": "t", "body": "", "head": {}, "state": "open"})
+        return Response(
+            405,
+            json={"message": "Pull Request has merge conflicts", "documentation_url": "https://docs.github.com/rest/pulls"},
+        )
+
+    gh = GitHubClient(token="fake", owner="o", repo="r")
+    await gh._client.aclose()
+    gh._client = httpx.AsyncClient(base_url="https://api.github.com", transport=MockTransport(handler))
+    result = await gh.merge_pr_safe("o", "r", 53)
+    await gh.close()
+    assert result["merged"] is False
+    assert "merge conflicts" in result["message"]
+    assert "documentation_url" not in result["message"]
 
 
 if __name__ == "__main__":

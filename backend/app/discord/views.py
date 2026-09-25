@@ -260,6 +260,28 @@ async def _edit_or_send(msg, channel, content: str):
     await channel.send(content)
 
 
+async def _read_head(repo: str, pr_number: int) -> dict:
+    owner, name = repo.split("/", 1)
+    github = GitHubClient()
+    try:
+        info = await github.get_pr_info(owner, name, int(pr_number))
+    finally:
+        await github.close()
+    info["url"] = f"https://github.com/{repo}/pull/{int(pr_number)}"
+    return info
+
+
+def _no_push_gate() -> dict:
+    return {
+        "passed": False,
+        "verdict": "failed",
+        "ci_status": "no_ci",
+        "summary": "Agent finished without pushing a commit to the branch.",
+        "requirement_alignment": {},
+        "diff_sanity": {},
+    }
+
+
 async def monitor_agent(agent_id: str, channel, task_id: str) -> None:
     """Poll until the cloud agent finishes. One Discord message, edited in place."""
     from app.discord.bot import bot
@@ -267,10 +289,22 @@ async def monitor_agent(agent_id: str, channel, task_id: str) -> None:
     pr_number = "?"
     attempt = 1
     current_agent_id = agent_id
+    before_sha = ""
+    branch = ""
+    pr_url = ""
     try:
         task = await get_task(await get_db(), task_id)
         if task and task.get("pr_number") is not None:
             pr_number = task["pr_number"]
+            pr_url = f"https://github.com/{task['repo']}/pull/{pr_number}"
+            try:
+                info = await _read_head(task["repo"], int(pr_number))
+                before_sha = info.get("head_sha") or task.get("head_sha") or ""
+                branch = info.get("branch") or ""
+                pr_url = info["url"]
+            except Exception:
+                logger.warning("head sha lookup failed", exc_info=True)
+                before_sha = task.get("head_sha") or ""
         if task and task.get("fix_attempts"):
             attempt = int(task["fix_attempts"])
     except Exception:
@@ -304,19 +338,31 @@ async def monitor_agent(agent_id: str, channel, task_id: str) -> None:
             continue
         state = status.get("status")
         if state == "completed":
-            if not status.get("pr_url"):
+            task = await get_task(await get_db(), task_id)
+            if not task or task.get("pr_number") is None:
                 await bot.send_agent_complete(task_id, status, message=msg)
                 return
             try:
-                gate = await _store_gate(task_id, status)
-            except Exception as exc:
-                logger.exception("quality gate failed task=%s", task_id)
-                gate = {
-                    "passed": False,
-                    "verdict": "failed",
-                    "ci_status": "failed",
-                    "summary": f"Quality gate failed: {exc}",
-                }
+                info = await _read_head(task["repo"], int(task["pr_number"]))
+            except Exception:
+                logger.exception("head sha after agent failed task=%s", task_id)
+                info = {"head_sha": before_sha, "branch": branch, "url": pr_url}
+            status["pr_url"] = info.get("url") or pr_url
+            status["branch"] = info.get("branch") or branch
+            status["pushed_to_pr"] = task["pr_number"]
+            if before_sha and info.get("head_sha") == before_sha:
+                gate = _no_push_gate()
+            else:
+                try:
+                    gate = await _store_gate(task_id, status)
+                except Exception as exc:
+                    logger.exception("quality gate failed task=%s", task_id)
+                    gate = {
+                        "passed": False,
+                        "verdict": "failed",
+                        "ci_status": "failed",
+                        "summary": f"Quality gate failed: {exc}",
+                    }
             if gate.get("passed"):
                 await bot.send_gate_result(task_id, status, gate, message=msg)
                 return
@@ -327,6 +373,8 @@ async def monitor_agent(agent_id: str, channel, task_id: str) -> None:
                     attempt += 1
                     current_agent_id = launched
                     failures = 0
+                    if info.get("head_sha"):
+                        before_sha = info["head_sha"]
                     continue
             await _send_exhausted(channel, task_id, status, gate)
             return
@@ -339,8 +387,13 @@ async def monitor_agent(agent_id: str, channel, task_id: str) -> None:
             )
             return
         if msg is not None:
+            shown = dict(status)
+            if pr_url:
+                shown["pr_url"] = shown.get("pr_url") or pr_url
+            if branch and not shown.get("branch"):
+                shown["branch"] = branch
             try:
-                await msg.edit(content=format_progress(pr_number, status))
+                await msg.edit(content=format_progress(pr_number, shown))
             except Exception:
                 logger.warning("progress edit failed", exc_info=True)
 
@@ -506,10 +559,8 @@ async def _approve_fix(interaction: discord.Interaction, task_id: str) -> None:
         await interaction.followup.send("Task not found.", ephemeral=True)
         return
     await accept_task(db, task_id)
-    result = await cursor.launch_agent(
-        repo_full_name=task["repo"],
-        prompt=task.get("composer_prompt") or "",
-        branch=f"pr-sentinel/fix-{task['pr_number']}",
+    result = await cursor.launch_on_pull(
+        task["repo"], int(task["pr_number"]), task.get("composer_prompt") or ""
     )
     await db.execute(
         "UPDATE tasks SET cursor_agent_id = ?, fix_attempts = ? WHERE id = ?",
@@ -520,7 +571,8 @@ async def _approve_fix(interaction: discord.Interaction, task_id: str) -> None:
         f"🚀 Cursor Cloud Agent launched!\n"
         f"**Agent ID:** `{result['agent_id']}`\n"
         f"**Model:** {model_label(result['model'])}\n"
-        f"**Repo:** {result['repo']}\n\n"
+        f"**Branch:** `{result['branch']}`\n"
+        f"**PR:** {result['pr_url']}\n\n"
         f"Use `/status` to check progress, `/stop` to cancel."
     )
     asyncio.create_task(monitor_agent(result["agent_id"], interaction.channel, task_id))
@@ -586,9 +638,8 @@ async def _relaunch(interaction: discord.Interaction, task_id: str) -> None:
     if not task:
         await interaction.followup.send("Task not found.", ephemeral=True)
         return
-    result = await cursor.launch_agent(
-        repo_full_name=task["repo"],
-        prompt=task.get("composer_prompt") or "",
+    result = await cursor.launch_on_pull(
+        task["repo"], int(task["pr_number"]), task.get("composer_prompt") or ""
     )
     await db.execute(
         "UPDATE tasks SET cursor_agent_id = ? WHERE id = ?",
@@ -610,23 +661,6 @@ async def _dismiss(interaction: discord.Interaction, task_id: str) -> None:
     await interaction.followup.send("Task dismissed.", ephemeral=True)
 
 
-async def close_fix_pr(pr_url: str) -> None:
-    """Close the rejected fix pull request and delete its branch."""
-    parsed = parse_pr_url(pr_url)
-    if not parsed:
-        return
-    owner, repo, number = parsed
-    github = GitHubClient()
-    try:
-        info = await github.get_pr_info(owner, repo, number)
-        await github.close_pr(owner, repo, number)
-        branch = info.get("branch") or ""
-        if branch.startswith("pr-sentinel/fix-"):
-            await github._client.delete(f"/repos/{owner}/{repo}/git/refs/heads/{branch}")
-    finally:
-        await github.close()
-
-
 async def _launch_retry(channel, task_id: str, status: dict, gate: dict, attempt: int, notice: str) -> str | None:
     """Start the next agent. Returns the new agent id, or None if the launch itself failed."""
     from app.services.llm_client import LLMClient
@@ -636,10 +670,9 @@ async def _launch_retry(channel, task_id: str, status: dict, gate: dict, attempt
     task = await get_task(db, task_id)
     if not task:
         return None
+    pr_url = f"https://github.com/{task['repo']}/pull/{task['pr_number']}"
     try:
-        retry_prompt = await build_retry_prompt(
-            task_id, gate, status.get("pr_url") or "", LLMClient()
-        )
+        retry_prompt = await build_retry_prompt(task_id, gate, pr_url, LLMClient())
     except Exception as exc:
         logger.exception("retry diagnosis failed task=%s", task_id)
         retry_prompt = build_fallback_retry_prompt(
@@ -650,18 +683,9 @@ async def _launch_retry(channel, task_id: str, status: dict, gate: dict, attempt
         await channel.send(
             f"⚠️ Detailed analysis failed ({str(exc)[:100]}), retrying with simplified feedback..."
         )
-    if status.get("pr_url"):
-        try:
-            await close_fix_pr(status["pr_url"])
-        except Exception:
-            logger.warning("close fix pr failed", exc_info=True)
     await channel.send(notice)
     try:
-        result = await cursor.launch_agent(
-            repo_full_name=task["repo"],
-            prompt=retry_prompt,
-            branch=f"pr-sentinel/fix-{task['pr_number']}-v{attempt + 1}",
-        )
+        result = await cursor.launch_on_pull(task["repo"], int(task["pr_number"]), retry_prompt)
     except Exception:
         logger.exception("retry launch failed task=%s", task_id)
         return None
