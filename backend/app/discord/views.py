@@ -253,6 +253,8 @@ async def monitor_agent(agent_id: str, channel, task_id: str) -> None:
 
     failures = 0
     max_failures = 10
+    # After a follow-up, Cursor can still report the previous FINISHED for a few polls.
+    ignore_completed = 0
     while failures < max_failures:
         await asyncio.sleep(15)
         try:
@@ -273,6 +275,11 @@ async def monitor_agent(agent_id: str, channel, task_id: str) -> None:
                 return
             continue
         state = status.get("status")
+        if state == "running":
+            ignore_completed = 0
+        if state == "completed" and ignore_completed:
+            ignore_completed -= 1
+            continue
         if state == "completed":
             if not status.get("pr_url"):
                 await bot.send_agent_complete(task_id, status, message=msg)
@@ -287,6 +294,15 @@ async def monitor_agent(agent_id: str, channel, task_id: str) -> None:
                     "ci_status": "failed",
                     "summary": f"Quality gate failed: {exc}",
                 }
+            if not gate.get("passed") and await _retry_failed_gate(task_id, status, gate, agent_id):
+                ignore_completed = 4
+                await _edit_or_send(
+                    msg,
+                    channel,
+                    f"🔧 Gate failed on PR #{pr_number}. "
+                    "Retrying with a diagnosis of what broke.",
+                )
+                continue
             await bot.send_gate_result(task_id, status, gate, message=msg)
             return
         if state in ("failed", "cancelled", "expired"):
@@ -550,6 +566,34 @@ async def _dismiss(interaction: discord.Interaction, task_id: str) -> None:
     await interaction.followup.send("Task dismissed.", ephemeral=True)
 
 
+async def _retry_failed_gate(task_id: str, status: dict, gate: dict, agent_id: str) -> bool:
+    """One follow-up per failed gate, up to two. The prompt names the actual failure."""
+    import json
+
+    attempt = int(gate.get("retry_attempt") or 0)
+    if attempt >= 2:
+        return False
+    from app.services.retry_diagnostics import build_retry_prompt, gather_failure_context
+
+    try:
+        context = await gather_failure_context(task_id, gate, status.get("pr_url") or "")
+        prompt = await build_retry_prompt(context)
+        if not prompt:
+            return False
+        gate["retry_attempt"] = attempt + 1
+        db = await get_db()
+        await db.execute(
+            "UPDATE tasks SET quality_gate_json = ?, composer_prompt = ? WHERE id = ?",
+            (json.dumps(gate), prompt, task_id),
+        )
+        await db.commit()
+        await cursor.resume_agent(agent_id, prompt)
+    except Exception:
+        logger.exception("retry diagnosis failed task=%s", task_id)
+        return False
+    return True
+
+
 async def _store_gate(task_id: str, status: dict) -> dict:
     import json
 
@@ -560,6 +604,7 @@ async def _store_gate(task_id: str, status: dict) -> dict:
         raise RuntimeError("Fix PR URL is missing")
     db = await get_db()
     task = await get_task(db, task_id)
+    previous = json_loads((task or {}).get("quality_gate_json"))
     diag = json_loads((task or {}).get("diagnosis_json"))
     github = GitHubClient()
     try:
@@ -577,6 +622,7 @@ async def _store_gate(task_id: str, status: dict) -> dict:
             diag,
             github=github,
         )
+        gate["retry_attempt"] = int(previous.get("retry_attempt") or 0)
     finally:
         await github.close()
     await db.execute(
