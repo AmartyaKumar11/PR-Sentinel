@@ -22,9 +22,10 @@ class _FakeLLM:
         self.system = ""
         self.user = ""
 
-    async def chat(self, system, messages):
+    async def chat(self, system, messages, **kwargs):
         self.system = system
         self.user = messages[0]["content"]
+        self.kwargs = kwargs
         return "Keep create_order. Raise ValueError when quantity is below 1."
 
 
@@ -38,6 +39,7 @@ async def test_build_retry_prompt_returns_the_model_text(monkeypatch):
     text = await build_retry_prompt("task-1", {}, "https://github.com/o/r/pull/1", llm)
     assert text.startswith("Keep create_order")
     assert llm.system is RETRY_ANALYSIS_PROMPT
+    assert llm.kwargs.get("thinking") is False
     assert "qty" in llm.user
 
 
@@ -45,12 +47,18 @@ def test_fallback_names_unmet_requirements():
     text = build_fallback_retry_prompt(
         {
             "ci_status": "passed",
-            "requirement_alignment": {"delta charge": 0.12, "owner token": 0.96},
+            "requirement_alignment": {
+                "Reject a coupon when the code is empty or expired": 0.51,
+                "Charge the customer in integer cents": 0.94,
+            },
         },
         "Charge only the price difference.",
+        {"changed_files": ["src/coupons.py"], "changed_identifiers": ["coupons.apply_coupon"]},
     )
-    assert "delta charge (score: 0.12)" in text
-    assert "owner token (score: 0.96)" in text
+    assert "REQUIREMENT NOT MET: Reject a coupon when the code is empty or expired (scored 0.51 — partially implemented)." in text
+    assert "In src/coupons.py, in apply_coupon():" in text
+    assert "Test: test_reject_a_coupon_when_the_code must pass." in text
+    assert "Charge the customer in integer cents (score: 0.94)" in text
     assert "Charge only the price difference." in text
 
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 
 from app.services.llm_client import LLMClient
+from app.services.retry_diagnostics import requirement_spec
 
 PROMPT_CRAFT_SYSTEM = """You write fix instructions for a Cursor Cloud Agent working on a real codebase. The agent will read your instructions and generate code autonomously. Your prompt determines the quality of that code.
 
@@ -88,16 +89,32 @@ async def craft_prompt(
         "affected_files": triage.get("affected_files_priority", []),
     }
     diff = (diagnosis.get("diff_summary") or "")[:2000]
+    missing = context["missing_requirements"] or []
+    specs = "\n\n".join(requirement_spec(req, diagnosis) for req in missing)
     user_msg = (
         "Craft a Cursor Cloud Agent prompt for this PR fix.\n\n"
         f"{json.dumps(context, indent=2)}\n\n"
         "Current diff, truncated to the changed code. Reference these real functions "
         "and the order they run, not just the file names:\n"
         f"{diff}\n\n"
+        "The prompt must keep a separate section for every missing requirement, "
+        "with the file, the function, the behavior, and the test name. "
+        "Do not collapse them into a bullet list. Drafts:\n"
+        f"{specs}\n\n"
         "The agent will be launched on the repository with full codebase access.\n"
         "It should create a fix branch and open a pull request when done."
     )
-    return await deepseek.chat(PROMPT_CRAFT_SYSTEM, [{"role": "user", "content": user_msg}])
+    text = await deepseek.chat(
+        PROMPT_CRAFT_SYSTEM,
+        [{"role": "user", "content": user_msg}],
+        thinking=False,
+    )
+    cleaned = (text or "").strip()
+    if not cleaned:
+        raise RuntimeError("DeepSeek returned an empty composer prompt")
+    if specs and "Test:" not in cleaned:
+        cleaned = cleaned + "\n\n## Requirement specs\n" + specs
+    return cleaned
 
 
 def _simple_template(diagnosis: dict, triage: dict) -> str:

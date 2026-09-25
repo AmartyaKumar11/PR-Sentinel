@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 
 from app.database import get_db
+
+logger = logging.getLogger(__name__)
 from app.services.github_client import GitHubClient
 from app.services.llm_client import LLMClient
 from app.services.task_manager import get_task
@@ -120,16 +123,55 @@ async def gather_failure_context(
             await gh.close()
 
 
-def build_fallback_retry_prompt(gate_result: dict, original_prompt: str) -> str:
-    """Used when the diagnostic model call fails. Still names the unmet requirements."""
+def _file_and_function(diagnosis: dict | None) -> tuple[str, str]:
+    diagnosis = diagnosis or {}
+    files = [item for item in (diagnosis.get("changed_files") or []) if isinstance(item, str)]
+    source = [path for path in files if path.endswith(".py") and not path.startswith("tests/")]
+    file = (source or files or ["the changed source file"])[0]
+    names = []
+    for item in diagnosis.get("changed_identifiers") or []:
+        if isinstance(item, str) and item:
+            names.append(item.rsplit(".", 1)[-1])
+    func = names[0] if names else "the function this requirement changes"
+    return file, func
+
+
+def _test_name(requirement: str) -> str:
+    words = re.findall(r"[A-Za-z0-9]+", requirement.lower())[:6]
+    return "test_" + "_".join(words or ["requirement"])
+
+
+def requirement_spec(requirement: str, diagnosis: dict | None = None, score: float | None = None) -> str:
+    """One requirement as file, function, behavior, and a test name. No model call."""
+    file, func = _file_and_function(diagnosis)
+    if score is None:
+        header = f"REQUIREMENT: {requirement}"
+    else:
+        state = "partially implemented" if score >= 0.4 else "not implemented"
+        header = f"REQUIREMENT NOT MET: {requirement} (scored {score:.2f} — {state})."
+    return (
+        f"{header}\n\n"
+        f"In {file}, in {func}():\n"
+        f"- Implement this before any other work for this requirement: {requirement}\n"
+        f"- Do that check before a database lookup, a charge, or an email send\n"
+        f"- If the check fails, return an error and do not continue into the success path\n"
+        f"- Keep the behavior that already satisfies the other requirements\n\n"
+        f"Test: {_test_name(requirement)} must pass."
+    )
+
+
+def build_fallback_retry_prompt(
+    gate_result: dict,
+    original_prompt: str,
+    diagnosis: dict | None = None,
+) -> str:
+    """Used when the diagnostic model call fails. Each miss becomes a mini-spec."""
     parts = ["Your previous fix did not pass validation.\n"]
     alignment = gate_result.get("requirement_alignment") or {}
     unmet = {key: value for key, value in alignment.items() if value < 0.6}
     met = {key: value for key, value in alignment.items() if value >= 0.6}
-    if unmet:
-        parts.append("REQUIREMENTS NOT YET ADDRESSED:")
-        for req, score in unmet.items():
-            parts.append(f"  - {req} (score: {score:.2f})")
+    for req, score in unmet.items():
+        parts.append(requirement_spec(req, diagnosis, score))
         parts.append("")
     if met:
         parts.append("REQUIREMENTS ALREADY MET (keep these):")
@@ -160,11 +202,20 @@ async def build_retry_prompt(
     diff = packed.get("fix_diff") or ""
     if len(diff) > 8000:
         packed["fix_diff"] = diff[:8000] + "\n...[diff truncated]"
+    previous = packed.get("previous_prompt") or ""
+    if len(previous) > 4000:
+        packed["previous_prompt"] = previous[:4000] + "\n...[prompt truncated]"
     user = (
         "Write the next Cursor Cloud Agent prompt from this failure context.\n\n"
         + json.dumps(packed, indent=2, default=str)
     )
-    text = await deepseek.chat(RETRY_ANALYSIS_PROMPT, [{"role": "user", "content": user}])
+    logger.info("retry user_message chars=%s", len(user))
+    text = await deepseek.chat(
+        RETRY_ANALYSIS_PROMPT,
+        [{"role": "user", "content": user}],
+        thinking=False,
+    )
+    logger.info("retry deepseek response chars=%s body=%s", len(text or ""), (text or "")[:2000])
     cleaned = (text or "").strip()
     if not cleaned:
         raise RuntimeError("DeepSeek returned an empty retry prompt")

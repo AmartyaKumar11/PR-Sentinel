@@ -624,7 +624,11 @@ async def _launch_retry(channel, task_id: str, status: dict, gate: dict, attempt
         )
     except Exception as exc:
         logger.exception("retry diagnosis failed task=%s", task_id)
-        retry_prompt = build_fallback_retry_prompt(gate, task.get("composer_prompt") or "")
+        retry_prompt = build_fallback_retry_prompt(
+            gate,
+            task.get("composer_prompt") or "",
+            json_loads(task.get("diagnosis_json")),
+        )
         await channel.send(
             f"⚠️ Detailed analysis failed ({str(exc)[:100]}), retrying with simplified feedback..."
         )
