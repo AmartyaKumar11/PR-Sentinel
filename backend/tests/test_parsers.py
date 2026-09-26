@@ -1,11 +1,7 @@
 """Per-language parsers. No network. Tree-sitter comes from the installed wheel."""
 
 from app.services.graph_builder import build_graph
-from app.services.parsers.go_parser import GoParser
-from app.services.parsers.java_parser import JavaParser
-from app.services.parsers.javascript_parser import JavaScriptParser
 from app.services.parsers.python_parser import PythonParser
-from app.services.parsers.typescript_parser import TypeScriptParser
 
 PY = """
 from src.auth import validate_token
@@ -65,27 +61,50 @@ def test_python_parser_keeps_existing_behavior():
 
 
 def test_typescript_parser_links_named_import():
-    nodes, edges = TypeScriptParser().parse_file("src/users.ts", TS)
-    assert any(node.name == "getUser" for node in nodes)
-    assert any(edge.target == "auth.validateToken" for edge in edges)
+    graph = build_graph(
+        {
+            "src/auth.ts": "export function validateToken(token: string) { return token; }\n",
+            "src/users.ts": TS,
+        }
+    )
+    assert any(node["name"] == "getUser" for node in graph["nodes"])
+    assert any(edge["to"] == "auth.validateToken" for edge in graph["edges"])
 
 
 def test_javascript_parser_links_require():
-    nodes, edges = JavaScriptParser().parse_file("src/users.js", JS)
-    assert nodes
-    assert edges
+    graph = build_graph(
+        {
+            "src/auth.js": "function validateToken(token) { return token; }\n",
+            "src/users.js": JS,
+        }
+    )
+    assert any(node["name"] == "getUser" for node in graph["nodes"])
+    assert graph["edges"]
 
 
 def test_go_parser_links_selector_call():
-    nodes, edges = GoParser().parse_file("pkg/users/user.go", GO)
-    assert any(node.name == "GetUser" for node in nodes)
-    assert any(edge.target == "auth.ValidateToken" for edge in edges)
+    graph = build_graph(
+        {
+            "pkg/auth.go": "package auth\n\nfunc ValidateToken(token string) {}\n",
+            "pkg/users/user.go": GO,
+        }
+    )
+    assert any(node["name"] == "GetUser" for node in graph["nodes"])
+    assert any(edge["to"] == "auth.ValidateToken" for edge in graph["edges"])
 
 
 def test_java_parser_finds_class_and_import():
-    nodes, edges = JavaParser().parse_file("com/example/users/UserService.java", JAVA)
-    assert nodes
-    assert edges
+    graph = build_graph(
+        {
+            "com/example/auth/AuthService.java": (
+                "package com.example.auth;\n"
+                "public class AuthService { public static void validateToken(String t) {} }\n"
+            ),
+            "com/example/users/UserService.java": JAVA,
+        }
+    )
+    assert any(node["name"] == "UserService" for node in graph["nodes"])
+    assert graph["edges"]
 
 
 def test_mixed_language_graph_keeps_both_files():
@@ -98,6 +117,40 @@ def test_mixed_language_graph_keeps_both_files():
 def test_unknown_extension_returns_empty_graph():
     graph = build_graph({"README.md": "# hi", "config.yaml": "a: 1"})
     assert graph == {"nodes": [], "edges": []}
+
+
+def test_name_match_links_bare_call():
+    graph = build_graph(
+        {
+            "src/auth.ts": "export function validateToken(token: string) { return token; }\n",
+            "src/users.ts": "export function getUser(token: string) { validateToken(token); }\n",
+        }
+    )
+    assert any(edge["to"] == "auth.validateToken" and edge["from"] == "users.getUser" for edge in graph["edges"])
+
+
+def test_ambiguous_name_keeps_every_candidate():
+    graph = build_graph(
+        {
+            "lib/a/check.ts": "export function validate(token: string) { return token; }\n",
+            "lib/b/check.ts": "export function validate(token: string) { return token; }\n",
+            "lib/c/user.ts": "export function getUser(token: string) { validate(token); }\n",
+        }
+    )
+    targets = {edge["to"] for edge in graph["edges"] if edge["from"] == "c.user.getUser"}
+    assert "a.check.validate" in targets
+    assert "b.check.validate" in targets
+
+
+def test_rust_works_without_a_dedicated_parser():
+    graph = build_graph(
+        {
+            "src/auth.rs": "fn validate_token() {}\n",
+            "src/user.rs": "fn get_user() { validate_token(); }\n",
+        }
+    )
+    assert any(node["name"] == "get_user" for node in graph["nodes"])
+    assert any(edge["to"] == "auth.validate_token" and edge["from"] == "user.get_user" for edge in graph["edges"])
 
 
 def test_broken_typescript_does_not_drop_python():
