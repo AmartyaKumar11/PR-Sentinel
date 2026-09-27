@@ -12,18 +12,27 @@ from app.services.graph_builder import build_graph
 from app.services.prompt_crafter import craft_prompt
 from app.services.repo_context import (
     _blank,
+    _refresh_tasks,
     apply_review,
     bootstrap_context,
     collapse_fact,
     config_hashes,
+    context_for_diagnosis,
     contradicted_facts,
     correct_failed_context,
     extract_hard_facts,
     load_context,
     merge_hard_facts,
+    merge_instruction_facts,
+    parse_coderabbit,
+    pin_conventions,
     project_row,
+    read_instruction_files,
     reinforce,
     render_context,
+    seed_conventions,
+    select_source_files,
+    stamp_instruction_hashes,
 )
 from app.services.task_manager import create_task
 
@@ -301,3 +310,150 @@ async def test_context_endpoint_returns_the_row():
     assert payload["conventions"] == {}
     empty = await repo_context("missing/repo")
     assert empty["hard_facts"] == {}
+
+
+def test_over_cap_samples_across_directories_not_one_folder():
+    paths = [f"aaa/f{i:04d}.py" for i in range(600)] + ["zzz/keep.py"]
+    picked = select_source_files(paths)
+    assert len(picked) == 500
+    assert "zzz/keep.py" in picked
+    assert sum(path.startswith("aaa/") for path in picked) == 499
+
+
+@pytest.mark.asyncio
+async def test_full_index_seeds_conventions_once_and_caps(monkeypatch):
+    calls = {"tree": 0}
+
+    class Fake:
+        async def list_tree_paths(self, owner, repo, ref):
+            calls["tree"] += 1
+            return ["src/a.py", "src/b.py", "README.md"]
+
+        async def list_dir(self, *_a, **_k):
+            return []
+
+        async def read_text(self, owner, repo, path, ref):
+            if path == "src/a.py":
+                return "from src.b import b\n"
+            if path == "src/b.py":
+                return "x = 1\n"
+            return None
+
+        async def close(self):
+            return None
+
+    monkeypatch.setattr("app.services.github_client.GitHubClient", lambda: Fake())
+    from app.services.repo_context import _run_full_index
+
+    await _run_full_index("o", "wide", "sha")
+    row = await load_context(await get_db(), "o/wide")
+    assert row["full_index_done"] == 1
+    assert row["conventions"]["import_style"]["dominant"] == "absolute"
+    assert row["conventions"]["import_style"]["evidence_count"] == 2
+    assert len(select_source_files([f"pkg/f{i}.py" for i in range(800)])) == 500
+    await _run_full_index("o", "wide", "sha")
+    assert calls["tree"] == 1
+
+
+@pytest.mark.asyncio
+async def test_first_review_returns_before_full_index_finishes(monkeypatch):
+    import asyncio
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def hang(_owner, _repo, _ref):
+        started.set()
+        await release.wait()
+
+    def kick(owner, repo, ref):
+        task = asyncio.create_task(hang(owner, repo, ref))
+        _refresh_tasks.add(task)
+        task.add_done_callback(_refresh_tasks.discard)
+
+    async def snap(_owner, _repo, _ref, extra=None):
+        return {}, ["src/auth.py", "tests/test_auth.py"]
+
+    monkeypatch.setattr("app.services.repo_context.spawn_full_index", kick)
+    monkeypatch.setattr("app.services.repo_context.fetch_snapshot", snap)
+    try:
+        text = await context_for_diagnosis("o", "fresh", "sha")
+        assert started.is_set()
+        assert "pytest" in text
+        assert "alias" not in text
+    finally:
+        release.set()
+        pending = [task for task in list(_refresh_tasks) if not task.done()]
+        if pending:
+            await asyncio.gather(*pending)
+
+
+def test_coderabbit_yaml_becomes_an_instruction_fact():
+    text = "reviews:\n  path_instructions:\n    - instructions: Use pytest and absolute imports.\n"
+    hard, pins = parse_coderabbit(text)
+    assert hard["test_framework"]["value"] == "pytest"
+    assert hard["test_framework"]["confidence"] == 0.98
+    assert hard["test_framework"]["source"] == "instruction_file"
+    assert pins["import_style"] == ("absolute", ".coderabbit.yaml")
+    shown = render_context({"hard_facts": hard, "conventions": {}})
+    assert "This repo's .coderabbit.yaml requires pytest." in shown
+
+
+@pytest.mark.asyncio
+async def test_agents_md_is_one_deepseek_pass():
+    class LLM:
+        def __init__(self):
+            self.n = 0
+
+        async def chat(self, system, messages, thinking=True):
+            self.n += 1
+            assert thinking is False
+            return (
+                '{"test_framework":"pytest","import_style":"relative","file_naming":"",'
+                '"error_handling":"","test_style":"","rules":"Keep handlers small."}'
+            )
+
+    llm = LLM()
+    files = {"AGENTS.md": "Use pytest. Relative imports only. Keep handlers small."}
+    first = await read_instruction_files(files, {}, llm)
+    assert llm.n == 1
+    assert first["hard"]["test_framework"]["confidence"] == 0.98
+    assert first["hard"]["test_framework"]["source"] == "instruction_file"
+    assert first["pins"]["import_style"][0] == "relative"
+    assert "Keep handlers small." in first["text"]
+    hashes = config_hashes(files, [])
+    stamp_instruction_hashes(hashes, files)
+    again = await read_instruction_files(files, hashes, llm)
+    assert again is None
+    assert llm.n == 1
+    shown = render_context(
+        {
+            "hard_facts": first["hard"],
+            "conventions": pin_conventions({}, first["pins"], "t"),
+            "instruction_text": first["text"],
+        }
+    )
+    assert "This repo's AGENTS.md requires pytest." in shown
+    assert "Repo rules:" in shown
+
+
+def test_instruction_file_beats_inferred_and_config_beats_instruction():
+    seeded = seed_conventions({"import_style": {"absolute": 40}}, 40, "t")
+    pinned = pin_conventions(seeded, {"import_style": ("relative", "AGENTS.md")}, "t")
+    again = reinforce(pinned, {"import_style": {"absolute": 20}}, "t")
+    assert again["import_style"]["dominant"] == "relative"
+    assert again["import_style"]["confidence"] == 0.98
+
+    facts = extract_hard_facts({}, ["src/auth.py", "tests/test_auth.py"])
+    hard = {
+        "test_framework": {
+            "value": "unittest",
+            "confidence": 0.98,
+            "source": "instruction_file",
+            "origin": "AGENTS.md",
+            "overridden_by_user": False,
+        }
+    }
+    merged = merge_instruction_facts(facts, hard)
+    assert merged["test_framework"]["value"] == "pytest"
+    assert merged["test_framework"]["source"] == "config"

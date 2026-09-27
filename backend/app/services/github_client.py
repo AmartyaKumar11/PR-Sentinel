@@ -170,6 +170,33 @@ class GitHubClient:
             out.append(p)
         return out
 
+    async def list_tree_paths(self, owner: str, repo: str, ref: str) -> list[str]:
+        """Every blob path. One recursive call, then one request per subtree if GitHub truncates."""
+        response = await self._client.get(
+            f"/repos/{owner}/{repo}/git/trees/{ref}",
+            params={"recursive": "1"},
+        )
+        if response.status_code != 200:
+            return []
+        data = response.json()
+        if not data.get("truncated"):
+            return [item["path"] for item in data.get("tree") or [] if item.get("type") == "blob" and item.get("path")]
+        return await self._walk_tree(owner, repo, data.get("sha") or ref, "")
+
+    async def _walk_tree(self, owner: str, repo: str, sha: str, prefix: str) -> list[str]:
+        response = await self._client.get(f"/repos/{owner}/{repo}/git/trees/{sha}")
+        if response.status_code != 200:
+            return []
+        paths = []
+        for item in response.json().get("tree") or []:
+            name = item.get("path") or ""
+            path = f"{prefix}/{name}" if prefix else name
+            if item.get("type") == "blob":
+                paths.append(path)
+            elif item.get("type") == "tree" and item.get("sha"):
+                paths.extend(await self._walk_tree(owner, repo, item["sha"], path))
+        return paths
+
     async def post_comment(self, owner: str, repo: str, pr_number: int, body: str) -> dict:
         r = await self._client.post(
             f"/repos/{owner}/{repo}/issues/{pr_number}/comments",

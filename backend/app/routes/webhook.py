@@ -45,6 +45,9 @@ async def github_webhook(request: Request):
     owner, repo = full.split("/", 1)
     pr_number = pr["number"]
     head_sha = pr["head"]["sha"]
+    from app.services.repo_context import spawn_full_index
+
+    spawn_full_index(owner, repo, head_sha)
 
     db = await get_db()
     existing = await get_existing_task(db, full, pr_number)

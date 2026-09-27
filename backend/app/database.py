@@ -85,13 +85,15 @@ CREATE INDEX IF NOT EXISTS idx_trace_task_phase ON trace_steps(task_id, phase);
 CREATE INDEX IF NOT EXISTS idx_pending_repo_pr ON pending_analysis(repo, pr_number);
 
 CREATE TABLE IF NOT EXISTS repo_context (
-    repo_full_name  TEXT PRIMARY KEY,
-    hard_facts      TEXT NOT NULL DEFAULT '{}',
-    conventions     TEXT NOT NULL DEFAULT '{}',
-    config_hashes   TEXT NOT NULL DEFAULT '{}',
-    created_at      TEXT NOT NULL,
-    updated_at      TEXT NOT NULL,
-    version         INTEGER NOT NULL DEFAULT 1
+    repo_full_name    TEXT PRIMARY KEY,
+    hard_facts        TEXT NOT NULL DEFAULT '{}',
+    conventions       TEXT NOT NULL DEFAULT '{}',
+    config_hashes     TEXT NOT NULL DEFAULT '{}',
+    created_at        TEXT NOT NULL,
+    updated_at        TEXT NOT NULL,
+    version           INTEGER NOT NULL DEFAULT 1,
+    full_index_done   INTEGER NOT NULL DEFAULT 0,
+    instruction_text  TEXT NOT NULL DEFAULT ''
 );
 """
 
@@ -129,6 +131,14 @@ async def _migrate_columns(db: aiosqlite.Connection) -> None:
     ):
         if col not in existing:
             await db.execute(f"ALTER TABLE tasks ADD COLUMN {col} {decl}")
+    cur = await db.execute("PRAGMA table_info(repo_context)")
+    context_cols = {row[1] for row in await cur.fetchall()}
+    for col, decl in (
+        ("full_index_done", "INTEGER NOT NULL DEFAULT 0"),
+        ("instruction_text", "TEXT NOT NULL DEFAULT ''"),
+    ):
+        if context_cols and col not in context_cols:
+            await db.execute(f"ALTER TABLE repo_context ADD COLUMN {col} {decl}")
 
 
 async def close_db() -> None:

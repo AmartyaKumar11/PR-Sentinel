@@ -36,6 +36,12 @@ jev_mod.JevClient = _FakeJev
 
 
 @pytest.fixture(autouse=True)
+def _no_live_repo_index(monkeypatch):
+    """Webhook tests must not open GitHub to index a repo."""
+    monkeypatch.setattr("app.services.repo_context.spawn_full_index", lambda *_a, **_k: None)
+
+
+@pytest.fixture(autouse=True)
 def _dont_run_agent(monkeypatch):
     import app.routes.webhook as webhook
 
