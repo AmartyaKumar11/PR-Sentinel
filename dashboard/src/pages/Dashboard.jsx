@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { DEFAULT_REPO, getReviews } from '../api/client';
+import { ContextPanel } from '../components/ContextPanel';
 import { PRList } from '../components/PRList';
 
 export function Dashboard() {
@@ -33,6 +34,7 @@ export function Dashboard() {
       </div>
 
       {error && <div className="text-sm text-red-600">{error}</div>}
+      <ContextPanel repo={DEFAULT_REPO} />
       <PRList reviews={reviews} />
     </div>
   );

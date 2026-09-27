@@ -234,3 +234,31 @@ async def setup_commands(bot):
             )
 
         await _guard(interaction, work)
+
+    @bot.tree.command(name="context", description="Show or override this repo's derived context")
+    @app_commands.describe(field="Fact or convention to override", value="Value to store")
+    async def context(interaction: discord.Interaction, field: str | None = None, value: str | None = None):
+        async def work():
+            from app.services.repo_context import format_context, load_context, set_override
+
+            db = await get_db()
+            found = await db.execute("SELECT repo FROM tasks ORDER BY created_at DESC LIMIT 1")
+            task = await found.fetchone()
+            repo = dict(task)["repo"] if task else ""
+            if not repo:
+                await interaction.followup.send("No repo yet. Context appears after the first review.")
+                return
+            if field or value:
+                if not field or not value:
+                    await interaction.followup.send("Use /context set <field> <value>.")
+                    return
+                try:
+                    row = await set_override(db, repo, field, value)
+                except ValueError as exc:
+                    await interaction.followup.send(str(exc))
+                    return
+                await interaction.followup.send(format_context(row)[:1900])
+                return
+            await interaction.followup.send(format_context(await load_context(db, repo))[:1900])
+
+        await _guard(interaction, work)

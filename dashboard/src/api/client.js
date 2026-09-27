@@ -12,4 +12,7 @@ export const getReviewDetail = (taskId) =>
 
 export const getHealth = () => api.get('/health').then((r) => r.data);
 
+export const getContext = (repo) =>
+  api.get('/context', { params: { repo } }).then((r) => r.data);
+
 export const DEFAULT_REPO = 'AmartyaKumar11/pr-sentinel-demo';

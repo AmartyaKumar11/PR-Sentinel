@@ -219,4 +219,13 @@ async def build_retry_prompt(
     cleaned = (text or "").strip()
     if not cleaned:
         raise RuntimeError("DeepSeek returned an empty retry prompt")
+    note = ""
+    try:
+        from app.services.repo_context import correct_failed_context
+
+        note = await correct_failed_context(task_id, gate_result, context.get("fix_diff") or "")
+    except Exception:
+        logger.warning("context self-correction failed", exc_info=True)
+    if note:
+        cleaned += "\n\n" + note
     return cleaned

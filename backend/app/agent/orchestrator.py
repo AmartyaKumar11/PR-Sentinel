@@ -49,6 +49,22 @@ def _reqs_from_issue(issue: dict | None) -> list[str]:
     return parts[:5]
 
 
+def _changed_paths(diagnosis: dict) -> list[str]:
+    paths = []
+    for item in diagnosis.get("changed_files") or []:
+        if isinstance(item, str):
+            paths.append(item)
+        elif isinstance(item, dict) and item.get("path"):
+            paths.append(item["path"])
+    return paths
+
+
+def _with_context(base: str, block: str) -> str:
+    from app.services.repo_context import with_context
+
+    return with_context(base, block)
+
+
 class AgentOrchestrator:
     def __init__(self, deepseek: LLMClient | None = None, jev: JevClient | None = None):
         self.deepseek = deepseek or LLMClient()
@@ -69,7 +85,9 @@ class AgentOrchestrator:
     ):
         try:
             if mode == "full":
-                diagnosis = await self._run_diagnose(task_id, owner, repo, pr_number, head_sha)
+                diagnosis, context_block = await self._run_diagnose(
+                    task_id, owner, repo, pr_number, head_sha
+                )
                 if diagnosis.get("is_trivial"):
                     triage = {
                         "severity": "TRIVIAL",
@@ -84,7 +102,14 @@ class AgentOrchestrator:
                 else:
                     triage = await self._run_jev_triage(task_id, diagnosis)
                 await self._run_dispatch(
-                    task_id, owner, repo, pr_number, head_sha, diagnosis, triage
+                    task_id,
+                    owner,
+                    repo,
+                    pr_number,
+                    head_sha,
+                    diagnosis,
+                    triage,
+                    context_block,
                 )
             elif mode == "verify":
                 await self._run_jev_verify(task_id, owner, repo, pr_number, head_sha)
@@ -182,7 +207,7 @@ class AgentOrchestrator:
                 },
             }
             await self._emit(task_id, step, "diagnose", "answer", json.dumps(diagnosis))
-            return diagnosis
+            return diagnosis, ""
 
         step += 1
         await self._emit(task_id, step, "diagnose", "action", "fetch_linked_issue", tool="fetch_linked_issue")
@@ -209,6 +234,14 @@ class AgentOrchestrator:
             blast = await tools.execute(
                 "trace_blast_radius", changed_identifiers=identifiers, dep_graph=graph
             )
+
+        context_block = ""
+        try:
+            from app.services.repo_context import context_for_diagnosis
+
+            context_block = await context_for_diagnosis(owner, repo, head_sha)
+        except Exception:
+            logger.warning("context read failed", exc_info=True)
 
         reqs = _reqs_from_issue(issue)
         phantom = issue is None
@@ -242,14 +275,17 @@ class AgentOrchestrator:
             await self._emit(task_id, step, "diagnose", "thought", "DeepSeek intent alignment")
             try:
                 msg = await self.deepseek.chat(
-                    system=(
-                        "You are analyzing a PR diff against issue requirements. "
-                        "For each requirement, determine if the diff ACTUALLY IMPLEMENTS it — "
-                        "not just mentions related words. A function that takes an email parameter "
-                        "does NOT implement email validation unless it contains validation logic "
-                        "(regex, format check, library call). A comment that only says validation is missing does not count. Be strict. "
-                        "Copy each requirement string exactly into addressed or missing. "
-                        "Return only JSON."
+                    system=_with_context(
+                        (
+                            "You are analyzing a PR diff against issue requirements. "
+                            "For each requirement, determine if the diff ACTUALLY IMPLEMENTS it — "
+                            "not just mentions related words. A function that takes an email parameter "
+                            "does NOT implement email validation unless it contains validation logic "
+                            "(regex, format check, library call). A comment that only says validation is missing does not count. Be strict. "
+                            "Copy each requirement string exactly into addressed or missing. "
+                            "Return only JSON."
+                        ),
+                        context_block,
                     ),
                     messages=[
                         {
@@ -279,7 +315,7 @@ class AgentOrchestrator:
 
         step += 1
         await self._emit(task_id, step, "diagnose", "answer", json.dumps(diagnosis)[:2000])
-        return diagnosis
+        return diagnosis, context_block
 
     async def _run_jev_triage(self, task_id, diagnosis) -> dict:
         questions = build_triage_questions(diagnosis)
@@ -348,7 +384,7 @@ class AgentOrchestrator:
         return triage
 
     async def _run_dispatch(
-        self, task_id, owner, repo, pr_number, head_sha, diagnosis, triage
+        self, task_id, owner, repo, pr_number, head_sha, diagnosis, triage, context_block: str = ""
     ):
         # Sync intent onto diagnosis for templates
         if triage.get("intent_alignment"):
@@ -361,7 +397,9 @@ class AgentOrchestrator:
         try:
             from app.services.prompt_crafter import craft_prompt
 
-            composer = await craft_prompt(diagnosis, triage, deepseek=self.deepseek)
+            composer = await craft_prompt(
+                diagnosis, triage, deepseek=self.deepseek, context_prompt=context_block
+            )
         except Exception:
             logger.warning("prompt craft failed", exc_info=True)
         review_md = format_review_markdown(diagnosis, triage)
@@ -404,6 +442,12 @@ class AgentOrchestrator:
             {"step": 0, "phase": "dispatch", "type": "answer", "content": "Task dispatched."},
         )
         await self._notify_discord(task_id, owner, repo, pr_number, diagnosis, triage, composer)
+        try:
+            from app.services.repo_context import spawn_refresh
+
+            spawn_refresh(owner, repo, head_sha, _changed_paths(diagnosis))
+        except Exception:
+            logger.warning("context refresh schedule failed", exc_info=True)
 
     async def _run_jev_verify(self, task_id, owner, repo, pr_number, head_sha):
         db = await get_db()

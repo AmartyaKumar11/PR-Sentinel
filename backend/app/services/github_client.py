@@ -125,6 +125,31 @@ class GitHubClient:
         end = min(len(lines), 110)
         return "\n".join(lines[start:end])
 
+    async def read_text(self, owner: str, repo: str, path: str, ref: str) -> str | None:
+        """Full file text. None when the path is missing. Does not truncate."""
+        response = await self._client.get(
+            f"/repos/{owner}/{repo}/contents/{path}",
+            params={"ref": ref},
+        )
+        if response.status_code != 200:
+            return None
+        data = response.json()
+        if not isinstance(data, dict) or data.get("encoding") != "base64":
+            return None
+        return base64.b64decode(data.get("content") or "").decode("utf-8", errors="replace")
+
+    async def list_dir(self, owner: str, repo: str, path: str, ref: str) -> list[str]:
+        response = await self._client.get(
+            f"/repos/{owner}/{repo}/contents/{path}",
+            params={"ref": ref},
+        )
+        if response.status_code != 200:
+            return []
+        data = response.json()
+        if not isinstance(data, list):
+            return []
+        return [item["path"] for item in data if item.get("type") == "file" and item.get("path")]
+
     async def get_file_tree(
         self, owner: str, repo: str, ref: str, path_filter: str = ""
     ) -> list[str]:

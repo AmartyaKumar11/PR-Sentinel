@@ -83,6 +83,16 @@ CREATE INDEX IF NOT EXISTS idx_tasks_repo_pending ON tasks(repo, status)
 CREATE INDEX IF NOT EXISTS idx_trace_task ON trace_steps(task_id);
 CREATE INDEX IF NOT EXISTS idx_trace_task_phase ON trace_steps(task_id, phase);
 CREATE INDEX IF NOT EXISTS idx_pending_repo_pr ON pending_analysis(repo, pr_number);
+
+CREATE TABLE IF NOT EXISTS repo_context (
+    repo_full_name  TEXT PRIMARY KEY,
+    hard_facts      TEXT NOT NULL DEFAULT '{}',
+    conventions     TEXT NOT NULL DEFAULT '{}',
+    config_hashes   TEXT NOT NULL DEFAULT '{}',
+    created_at      TEXT NOT NULL,
+    updated_at      TEXT NOT NULL,
+    version         INTEGER NOT NULL DEFAULT 1
+);
 """
 
 

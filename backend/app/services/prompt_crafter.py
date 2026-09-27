@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 
 from app.services.llm_client import LLMClient
+from app.services.repo_context import attach_context, with_context
 from app.services.retry_diagnostics import requirement_spec
 
 PROMPT_CRAFT_SYSTEM = """You write fix instructions for a Cursor Cloud Agent working on a real codebase. The agent will read your instructions and generate code autonomously. Your prompt determines the quality of that code.
@@ -65,10 +66,11 @@ async def craft_prompt(
     triage: dict,
     jev_client=None,
     deepseek: LLMClient | None = None,
+    context_prompt: str = "",
 ) -> str:
     severity = triage.get("severity", "MEDIUM")
     if severity in ("TRIVIAL", "LOW"):
-        return _simple_template(diagnosis, triage)
+        return attach_context(_simple_template(diagnosis, triage), context_prompt)
 
     deepseek = deepseek or LLMClient()
     context = {
@@ -105,7 +107,7 @@ async def craft_prompt(
         "It should create a fix branch and open a pull request when done."
     )
     text = await deepseek.chat(
-        PROMPT_CRAFT_SYSTEM,
+        with_context(PROMPT_CRAFT_SYSTEM, context_prompt),
         [{"role": "user", "content": user_msg}],
         thinking=False,
     )
@@ -114,7 +116,7 @@ async def craft_prompt(
         raise RuntimeError("DeepSeek returned an empty composer prompt")
     if specs and "Test:" not in cleaned:
         cleaned = cleaned + "\n\n## Requirement specs\n" + specs
-    return cleaned
+    return attach_context(cleaned, context_prompt)
 
 
 def _simple_template(diagnosis: dict, triage: dict) -> str:
