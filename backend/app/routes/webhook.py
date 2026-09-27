@@ -52,14 +52,16 @@ async def github_webhook(request: Request):
     db = await get_db()
     existing = await get_existing_task(db, full, pr_number)
 
+    # Agent pushes synchronize the same PR. Skip them before verify, or an
+    # accepted task is sent through a transition it cannot make.
+    if action == "synchronize" and await _head_is_agent_fix(owner, repo, head_sha):
+        return {"skipped": True, "reason": "agent fix commit"}
+
     if action == "synchronize" and existing:
         asyncio.create_task(
             _agent.run(existing["id"], owner, repo, pr_number, head_sha, mode="verify")
         )
         return JSONResponse({"task_id": existing["id"]}, status_code=202)
-
-    if action == "synchronize" and await _head_is_agent_fix(owner, repo, head_sha):
-        return {"skipped": True, "reason": "agent fix commit"}
 
     if action == "opened" and sentinel_pr(pr):
         return {"skipped": True, "reason": "PR created by PR Sentinel"}

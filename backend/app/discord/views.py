@@ -768,6 +768,11 @@ async def merge_with_conflict_resolution(
 
 async def _merge_pr(interaction: discord.Interaction, task_id: str) -> None:
     task = await get_task(await get_db(), task_id)
+    if task and task.get("status") in ("error", "dismissed"):
+        await interaction.followup.send(
+            f"Not merging. Task is {task['status']}.", ephemeral=True
+        )
+        return
     parsed = parse_pr_url(pr_url_for_task(task) or "")
     if not parsed:
         await interaction.followup.send("No PR URL available.", ephemeral=True)
