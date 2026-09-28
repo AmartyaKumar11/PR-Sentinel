@@ -98,8 +98,12 @@ async def test_webhook_non_pr_skipped():
 
 
 @pytest.mark.asyncio
-async def test_webhook_synchronize_reuses_task_id():
+async def test_webhook_synchronize_reuses_task_id(monkeypatch):
     """opened then synchronize on same PR must reuse task_id (Bug 4)."""
+    async def _human(*_args, **_kwargs):
+        return False
+
+    monkeypatch.setattr("app.routes.webhook._head_is_agent_fix", _human)
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         # Seed a live task via opened
@@ -237,6 +241,59 @@ async def test_webhook_skips_rediagnosis_for_agent_commit(monkeypatch):
         )
     assert response.status_code == 200
     assert response.json()["reason"] == "agent fix commit"
+
+
+@pytest.mark.asyncio
+async def test_webhook_skips_agent_commit_while_task_accepted(monkeypatch):
+    """An agent push must not verify a task that is still accepted."""
+    calls = []
+
+    async def _spy(*args, **_kwargs):
+        calls.append(args)
+
+    async def _agent(*_args, **_kwargs):
+        return True
+
+    monkeypatch.setattr("app.routes.webhook._agent.run", _spy)
+    monkeypatch.setattr("app.routes.webhook._head_is_agent_fix", _agent)
+
+    from app.database import get_db
+    from app.services.task_manager import accept_task, create_task, get_task
+
+    task_id = "agent-sync-accepted"
+    db = await get_db()
+    await create_task(
+        db,
+        task_id,
+        "AmartyaKumar11/PR-Sentinel",
+        88002,
+        "aaa",
+        "MEDIUM",
+        "dispatch",
+        {"blast_radius": {}, "intent_alignment": {"missing": [], "scope_creep": [], "addressed": []}},
+        {"affected_files_priority": [], "suggested_fix_approach": "n/a"},
+        "review",
+        "prompt",
+    )
+    await accept_task(db, task_id)
+
+    body = _pr_payload(action="synchronize", pr=88002, sha="cfaef6a3")
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/api/webhook/github",
+            content=body,
+            headers={
+                "Content-Type": "application/json",
+                "X-GitHub-Event": "pull_request",
+                "X-Hub-Signature-256": _sign(body),
+            },
+        )
+    assert response.status_code == 200
+    assert response.json()["reason"] == "agent fix commit"
+    assert calls == []
+    task = await get_task(await get_db(), task_id)
+    assert task["status"] == "accepted"
 
 
 def test_run_status_keeps_activity():
