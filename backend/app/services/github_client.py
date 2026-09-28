@@ -6,6 +6,7 @@ import asyncio
 import base64
 import json
 import re
+from urllib.parse import quote
 
 import httpx
 
@@ -86,10 +87,22 @@ class GitHubClient:
             "head_sha": (pr.get("head") or {}).get("sha", ""),
             "branch": (pr.get("head") or {}).get("ref", ""),
             "state": pr.get("state", ""),
+            "merged": bool(pr.get("merged")),
+            "html_url": pr.get("html_url") or "",
             "draft": bool(pr.get("draft")),
             "node_id": pr.get("node_id") or "",
             "mergeable": pr.get("mergeable"),
         }
+
+    async def branch_exists(self, owner: str, repo: str, ref: str) -> bool:
+        """Head ref from the pull endpoint survives branch deletion. This 404s."""
+        r = await self._client.get(
+            f"/repos/{owner}/{repo}/branches/{quote(ref, safe='')}"
+        )
+        if r.status_code == 404:
+            return False
+        r.raise_for_status()
+        return True
 
     async def get_linked_issue(self, owner: str, repo: str, pr_number: int) -> dict | None:
         info = await self.get_pr_info(owner, repo, pr_number)

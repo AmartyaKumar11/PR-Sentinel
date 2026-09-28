@@ -600,6 +600,8 @@ async def _launch(task: dict | None, params: dict, channel=None) -> str:
         result = await cursor.launch_on_pull(
             task["repo"], int(task["pr_number"]), prompt, model=params.get("model")
         )
+    if result.get("error") == "pr_not_launchable":
+        return f"Can't launch agent — {result.get('reason')}"
     db = await get_db()
     await db.execute(
         "UPDATE tasks SET cursor_agent_id = ?, fix_attempts = ? WHERE id = ?",

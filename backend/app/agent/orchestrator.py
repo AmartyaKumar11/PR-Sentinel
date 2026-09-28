@@ -554,19 +554,22 @@ class AgentOrchestrator:
             from app.services.cursor_client import cursor
 
             result = await cursor.launch_on_pull(f"{owner}/{repo}", pr_number, composer)
-            db = await get_db()
-            await db.execute(
-                "UPDATE tasks SET cursor_agent_id = ? WHERE id = ?",
-                (result["agent_id"], task_id),
-            )
-            await db.commit()
-            await update_task_status(db, task_id, "accepted")
-            from app.discord.bot import bot
-            from app.discord.views import monitor_agent
+            if result.get("error") == "pr_not_launchable":
+                logger.warning("auto-approve skipped: %s", result.get("reason"))
+            else:
+                db = await get_db()
+                await db.execute(
+                    "UPDATE tasks SET cursor_agent_id = ? WHERE id = ?",
+                    (result["agent_id"], task_id),
+                )
+                await db.commit()
+                await update_task_status(db, task_id, "accepted")
+                from app.discord.bot import bot
+                from app.discord.views import monitor_agent
 
-            if bot.channel is not None:
-                asyncio.create_task(monitor_agent(result["agent_id"], bot.channel, task_id))
-            return
+                if bot.channel is not None:
+                    asyncio.create_task(monitor_agent(result["agent_id"], bot.channel, task_id))
+                return
         try:
             from app.discord.bot import bot
 

@@ -575,10 +575,16 @@ async def _approve_fix(interaction: discord.Interaction, task_id: str) -> None:
     if not task:
         await interaction.followup.send("Task not found.", ephemeral=True)
         return
-    await accept_task(db, task_id)
     result = await cursor.launch_on_pull(
         task["repo"], int(task["pr_number"]), task.get("composer_prompt") or ""
     )
+    if result.get("error") == "pr_not_launchable":
+        await interaction.followup.send(
+            f"⚠️ Can't launch agent — {result.get('reason')}",
+            ephemeral=True,
+        )
+        return
+    await accept_task(db, task_id)
     await db.execute(
         "UPDATE tasks SET cursor_agent_id = ?, fix_attempts = ? WHERE id = ?",
         (result["agent_id"], 1, task_id),
@@ -843,6 +849,12 @@ async def _relaunch(interaction: discord.Interaction, task_id: str) -> None:
     result = await cursor.launch_on_pull(
         task["repo"], int(task["pr_number"]), task.get("composer_prompt") or ""
     )
+    if result.get("error") == "pr_not_launchable":
+        await interaction.followup.send(
+            f"⚠️ Can't launch agent — {result.get('reason')}",
+            ephemeral=True,
+        )
+        return
     await db.execute(
         "UPDATE tasks SET cursor_agent_id = ? WHERE id = ?",
         (result["agent_id"], task_id),
@@ -888,6 +900,9 @@ async def _launch_retry(channel, task_id: str, status: dict, gate: dict, attempt
     await channel.send(notice)
     try:
         result = await cursor.launch_on_pull(task["repo"], int(task["pr_number"]), retry_prompt)
+        if result.get("error") == "pr_not_launchable":
+            logger.warning("retry launch refused task=%s %s", task_id, result.get("reason"))
+            return None
     except Exception:
         logger.exception("retry launch failed task=%s", task_id)
         return None

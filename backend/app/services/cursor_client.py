@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 
 import httpx
 
 from app.config import settings
+
+logger = logging.getLogger(__name__)
 
 _STATUS = {
     "FINISHED": "completed",
@@ -164,11 +167,7 @@ def _repo_url(full_name: str) -> str:
     return f"https://github.com/{full_name}"
 
 
-def launch_body(repo_full_name: str, prompt: str, model: str | None, branch: str | None) -> dict:
-    """Omit model when it is auto. Cursor then uses the account default.
-
-    The pull request already exists. Commits land on that head branch.
-    """
+def _prompt_text(prompt: str, branch: str | None) -> str:
     text = prompt or ""
     if branch:
         text += (
@@ -177,19 +176,49 @@ def launch_body(repo_full_name: str, prompt: str, model: str | None, branch: str
             "The PR already exists. "
             "Start each commit message with [pr-sentinel-fix]."
         )
+    return text or "Continue."
+
+
+def _with_model(body: dict, model: str | None) -> dict:
+    if model and model != "auto":
+        body["model"] = model
+    return body
+
+
+def launch_body(repo_full_name: str, prompt: str, model: str | None, branch: str | None) -> dict:
+    """Non-PR launch (conflict resolution). Cursor checks out source.repository."""
     source = {"repository": _repo_url(repo_full_name)}
     target: dict = {"skipReviewerRequest": True}
     if branch:
         source["ref"] = branch
         target["branchName"] = branch
-    body = {
-        "prompt": {"text": text or "Continue."},
-        "source": source,
-        "target": target,
-    }
-    if model and model != "auto":
-        body["model"] = model
-    return body
+    return _with_model(
+        {
+            "prompt": {"text": _prompt_text(prompt, branch)},
+            "source": source,
+            "target": target,
+        },
+        model,
+    )
+
+
+def pr_launch_body(pr_url: str, prompt: str, model: str | None, branch: str | None) -> dict:
+    """Existing PR. prUrl plus autoBranch false pushes to the live head.
+
+    source.ref is not sent: a merged PR's pull endpoint still returns a deleted head.ref.
+    """
+    return _with_model(
+        {
+            "prompt": {"text": _prompt_text(prompt, branch)},
+            "source": {"prUrl": pr_url},
+            "target": {"autoBranch": False, "skipReviewerRequest": True},
+        },
+        model,
+    )
+
+
+def _refuse(pr_number: int, reason: str) -> dict:
+    return {"error": "pr_not_launchable", "reason": reason}
 
 
 class CursorClient:
@@ -219,8 +248,7 @@ class CursorClient:
             "/agents",
             json=launch_body(repo_full_name, prompt, model, branch),
         )
-        response.raise_for_status()
-        data = response.json()
+        data = self._agent_json(response)
         target = data.get("target") or {}
         return {
             "agent_id": data["id"],
@@ -241,21 +269,50 @@ class CursorClient:
         """Push the fix onto the pull request's current head branch."""
         from app.services.github_client import GitHubClient
 
+        number = int(pr_number)
         owner, name = repo_full_name.split("/", 1)
         github = GitHubClient()
         try:
-            info = await github.get_pr_info(owner, name, int(pr_number))
+            info = await github.get_pr_info(owner, name, number)
+            branch = info.get("branch") or ""
+            if not branch:
+                raise RuntimeError(f"PR #{number} has no head branch")
+            if info.get("merged"):
+                return _refuse(number, f"PR #{number} is merged; its branch may be deleted.")
+            if (info.get("state") or "").lower() == "closed":
+                return _refuse(number, f"PR #{number} is closed; its branch may be deleted.")
+            if not await github.branch_exists(owner, name, branch):
+                return _refuse(number, f"PR #{number} branch '{branch}' does not exist.")
         finally:
             await github.close()
-        branch = info.get("branch") or ""
-        if not branch:
-            raise RuntimeError(f"PR #{pr_number} has no head branch")
-        result = await self.launch_agent(repo_full_name, prompt, model=model, branch=branch)
-        result["branch"] = branch
-        result["head_sha"] = info.get("head_sha") or ""
-        result["pr_url"] = f"https://github.com/{repo_full_name}/pull/{int(pr_number)}"
-        result["pr_number"] = int(pr_number)
-        return result
+        if not self.api_key:
+            raise RuntimeError("CURSOR_API_KEY is not set")
+        chosen = model or self.default_model
+        pr_url = info.get("html_url") or f"https://github.com/{repo_full_name}/pull/{number}"
+        response = await self._client.post(
+            "/agents",
+            json=pr_launch_body(pr_url, prompt, chosen, branch),
+        )
+        data = self._agent_json(response)
+        target = data.get("target") or {}
+        return {
+            "agent_id": data["id"],
+            "status": public_status(data.get("status")),
+            "model": "auto" if not chosen or chosen == "auto" else chosen,
+            "repo": repo_full_name,
+            "branch": target.get("branchName") or branch,
+            "pr_url": pr_url,
+            "head_sha": info.get("head_sha") or "",
+            "pr_number": number,
+        }
+
+    def _agent_json(self, response: httpx.Response) -> dict:
+        if response.status_code < 200 or response.status_code >= 300:
+            logger.error(
+                "cursor POST /v0/agents %s: %s", response.status_code, response.text
+            )
+            response.raise_for_status()
+        return response.json()
 
     async def get_run_status(self, agent_id: str) -> dict:
         response = await self._client.get(f"/agents/{agent_id}")
