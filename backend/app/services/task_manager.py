@@ -1,6 +1,16 @@
 from datetime import datetime, timezone
 import json
 
+
+class IllegalTransitionError(ValueError):
+    """A status transition not permitted by _TRANSITIONS.
+
+    Subclasses ValueError so existing `except ValueError` handlers still catch it.
+    Distinct type lets callers treat a racing/duplicate transition as a no-op
+    instead of a real failure that should mark the task 'error'.
+    """
+
+
 # Valid transitions from DATABASE.md
 _TRANSITIONS = {
     "pending": {"dispatched", "dismissed", "error"},
@@ -130,7 +140,7 @@ async def update_task_status(db, task_id: str, status: str, **extra_fields) -> b
     allowed = _TRANSITIONS.get(current, set())
     # any → error is always ok
     if status != "error" and status not in allowed and current != status:
-        raise ValueError(f"Invalid status transition: {current} → {status}")
+        raise IllegalTransitionError(f"Invalid status transition: {current} → {status}")
 
     now = datetime.now(timezone.utc).isoformat()
     timestamp_field = {

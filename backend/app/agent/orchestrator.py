@@ -24,6 +24,7 @@ from app.services.jev_triage import (
 from app.services.llm_client import LLMClient
 from app.services.sse_manager import sse_manager
 from app.services.task_manager import (
+    IllegalTransitionError,
     create_task,
     get_task,
     save_trace_step,
@@ -113,6 +114,12 @@ class AgentOrchestrator:
                 )
             elif mode == "verify":
                 await self._run_jev_verify(task_id, owner, repo, pr_number, head_sha)
+        except IllegalTransitionError as e:
+            # A duplicate or racing event (e.g. an agent-fix synchronize hitting a
+            # task that is still 'accepted') asked for a transition the state machine
+            # forbids. This is not a real failure: drop it and leave the task's status
+            # and verification columns intact, rather than corrupting it into 'error'.
+            logger.warning("dropping illegal transition for task=%s: %s", task_id, e)
         except Exception as e:
             logger.exception("agent failed task=%s", task_id)
             await self._emit_and_persist(

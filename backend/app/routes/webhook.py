@@ -52,8 +52,9 @@ async def github_webhook(request: Request):
     db = await get_db()
     existing = await get_existing_task(db, full, pr_number)
 
-    # Agent pushes synchronize the same PR. Skip them before verify, or an
-    # accepted task is sent through a transition it cannot make.
+    # An agent push synchronizes the same PR. Skip it BEFORE the verify branch:
+    # the in-flight task is still 'accepted', and verify would drive it through
+    # accepted -> dispatched, an illegal transition that lands the task in 'error'.
     if action == "synchronize" and await _head_is_agent_fix(owner, repo, head_sha):
         return {"skipped": True, "reason": "agent fix commit"}
 

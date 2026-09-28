@@ -534,7 +534,8 @@ async def _dispatch_label(label: str, entity_id: str, interaction: discord.Inter
     elif label == "Analyze with PR Sentinel":
         await _analyze_pending(interaction, entity_id)
     elif label in ("Merge", "Merge Anyway"):
-        await _merge_pr(interaction, entity_id)
+        # Merge Anyway is the partial-gate override; plain Merge is gated on verification.
+        await _merge_pr(interaction, entity_id, override=(label == "Merge Anyway"))
     elif label == "Reject Fix":
         parsed = parse_pr_url(_pr_url_from_message(interaction) or "")
         if parsed:
@@ -563,7 +564,9 @@ async def _override_click(interaction: discord.Interaction, entity_id: str) -> N
             ephemeral=True,
         )
         return
-    await _run_button(interaction, lambda: _merge_pr(interaction, entity_id), "Merge", entity_id)
+    await _run_button(
+        interaction, lambda: _merge_pr(interaction, entity_id, override=True), "Merge", entity_id
+    )
 
 
 async def _approve_fix(interaction: discord.Interaction, task_id: str) -> None:
@@ -766,7 +769,21 @@ async def merge_with_conflict_resolution(
         await github.close()
 
 
-async def _merge_pr(interaction: discord.Interaction, task_id: str) -> None:
+def _is_verified_for_merge(task: dict | None) -> bool:
+    """A task is safe to merge only if the verify-success path wrote all three
+    columns together (orchestrator._run_jev_verify). Status alone is not enough:
+    a task can reach 'resolved' via resolve_task with none of these set, and a
+    passed quality gate never sets them."""
+    if not task:
+        return False
+    return (
+        task.get("is_verified") == 1
+        and bool(task.get("verification_json"))
+        and bool(task.get("resolved_sha"))
+    )
+
+
+async def _merge_pr(interaction: discord.Interaction, task_id: str, override: bool = False) -> None:
     task = await get_task(await get_db(), task_id)
     if task and task.get("status") in ("error", "dismissed"):
         await interaction.followup.send(
@@ -778,6 +795,36 @@ async def _merge_pr(interaction: discord.Interaction, task_id: str) -> None:
         await interaction.followup.send("No PR URL available.", ephemeral=True)
         return
     owner, repo, pr_num = parsed
+
+    # Plain Merge must be gated on real verification. Merge Anyway and
+    # Override & Merge are deliberate human overrides and skip these checks.
+    if not override:
+        if not _is_verified_for_merge(task):
+            await interaction.followup.send(
+                f"Not merging PR #{pr_num}. This fix has not passed verification "
+                f"(task status: {task.get('status') if task else 'unknown'}). "
+                "Re-run the agent, or use Merge Anyway to override.",
+                ephemeral=True,
+            )
+            return
+        # The fix was verified against resolved_sha. If the branch moved since,
+        # the verified commit is no longer what would merge — refuse.
+        try:
+            info = await _read_head(f"{owner}/{repo}", pr_num)
+            current_head = info.get("head_sha") or ""
+        except Exception:
+            logger.warning("head sha check failed before merge task=%s", task_id, exc_info=True)
+            current_head = ""
+        resolved_sha = task.get("resolved_sha") or ""
+        if current_head and resolved_sha and current_head != resolved_sha:
+            await interaction.followup.send(
+                f"Not merging PR #{pr_num}. The branch moved after verification "
+                f"(verified `{resolved_sha[:7]}`, current `{current_head[:7]}`). "
+                "Re-run the agent to re-verify the new commit.",
+                ephemeral=True,
+            )
+            return
+
     result = await merge_with_conflict_resolution(owner, repo, pr_num, interaction.channel)
     if result.get("announced"):
         return
