@@ -178,8 +178,16 @@ A $20 budget covers about 10,000 reviews, before the Cursor subscription.
 
 ## Testing
 
+Backend unit tests (mocked; CI uses a 10s timeout):
+
 ```bash
 cd backend && pytest tests/ -v --timeout=10
+```
+
+Run one module:
+
+```bash
+cd backend && pytest tests/test_diff_parser.py -v --timeout=10
 ```
 
 Full pipeline against a live pull request (no Discord):
