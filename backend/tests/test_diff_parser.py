@@ -1,4 +1,8 @@
-from app.services.diff_parser import extract_changed_identifiers, parse_diff
+from app.services.diff_parser import (
+    extract_changed_identifiers,
+    is_code_file,
+    parse_diff,
+)
 
 SAMPLE = """diff --git a/src/auth.py b/src/auth.py
 --- a/src/auth.py
@@ -20,3 +24,9 @@ def test_parse_diff_extracts_file():
 def test_extract_changed_identifiers():
     ids = extract_changed_identifiers(parse_diff(SAMPLE))
     assert "src.auth.reset_password" in ids
+
+
+def test_is_code_file():
+    assert is_code_file("src/auth.py") is True
+    assert is_code_file("test_auth.py") is False
+    assert is_code_file("README.md") is False
