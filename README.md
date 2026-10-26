@@ -123,14 +123,21 @@ Point a GitHub repo's webhook at `http://localhost:8000/api/webhook/github`. Use
 
 ## Configuration
 
+Copy `backend/.env.example` to `backend/.env` and set the values below. Restart the API after changes.
+
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `GITHUB_TOKEN` | Yes | Fine-grained PAT with PR, issue, and content permissions |
 | `GITHUB_WEBHOOK_SECRET` | Yes | Webhook HMAC secret |
 | `DEEPSEEK_API_KEY` | Yes | DeepSeek Platform API key |
 | `DEEPSEEK_BASE_URL` | No | Default `https://api.deepseek.com` |
+| `LLM_MODEL` | No | Default `deepseek-v4-flash` |
 | `TYPESAFE_API_KEY` | Yes | TypeSafe AI API key. `JEV_API_KEY` is accepted as an alias |
 | `JEV_MODEL` | No | Default `jev-1.13.0`. Pin the version |
+| `APP_PORT` | No | Backend listen port (default `8000`) |
+| `DATABASE_PATH` | No | SQLite path (default `./sentinel.db`) |
+| `LOG_LEVEL` | No | Default `debug` |
+| `ALLOWED_ORIGINS` | No | Comma-separated CORS origins |
 | `DISCORD_BOT_TOKEN` | For Discord | Discord bot token |
 | `DISCORD_CHANNEL_ID` | For Discord | Channel for notifications |
 | `DISCORD_GUILD_ID` | For Discord | Server ID |
