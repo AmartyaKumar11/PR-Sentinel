@@ -7,11 +7,11 @@ import logging
 import re
 
 from app.database import get_db
-
-logger = logging.getLogger(__name__)
 from app.services.github_client import GitHubClient
 from app.services.llm_client import LLMClient
 from app.services.task_manager import get_task
+
+logger = logging.getLogger(__name__)
 
 _PR_URL = re.compile(r"github\.com/([^/]+)/([^/]+)/pull/(\d+)")
 

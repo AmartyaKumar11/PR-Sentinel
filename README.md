@@ -162,6 +162,18 @@ PR-Sentinel/
 | Dashboard | Vercel |
 | Extension | VSIX sideload into Cursor |
 
+## Troubleshooting
+
+| Symptom | What to check |
+|---------|----------------|
+| Webhook never fires | Confirm the GitHub webhook URL reaches your backend (`/api/webhook/github`). Locally, use ngrok (or similar) so GitHub can POST over HTTPS. |
+| `401` / signature failures on webhook | `GITHUB_WEBHOOK_SECRET` must match the secret configured on the GitHub webhook exactly. |
+| Discord bot silent | `DISCORD_BOT_TOKEN`, `DISCORD_CHANNEL_ID`, `DISCORD_GUILD_ID`, and `DISCORD_OWNER_ID` must be set; invite the bot to the guild with message/send permissions. |
+| Cursor agent never starts | Set `CURSOR_API_KEY` from the Cursor Dashboard. Without it, approve/fix flows cannot launch an agent. |
+| Dashboard blank / API errors | Backend must be on port 8000 (or update the dashboard API base URL). CORS and `npm run dev` vs production proxy settings matter. |
+| Backend import / venv issues on Windows | Activate with `.venv\Scripts\activate`, then reinstall: `pip install -r requirements.txt`. |
+| Quality gate always fails CI check | Ensure the target repo has GitHub Actions (or checks) finishing; the gate waits on real check runs for the head SHA. |
+
 ## Cost per review
 
 | Component | Cost |
