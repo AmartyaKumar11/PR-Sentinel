@@ -37,6 +37,7 @@ extension/out/
 ngrok*
 
 _demo_build/
+experiments/_tmp/
 backend/.env
 backend/sentinel.db
 backend/*.db

@@ -383,6 +383,9 @@ class TreeFleetClient:
         pr_number: int,
         prompt: str,
         model: str | None = None,
+        *,
+        include_base: bool = True,
+        include_repo: bool = True,
     ) -> dict:
         """Resolve the head the same way CursorClient.launch_on_pull does, then post a goal."""
         if not _REPO_RE.fullmatch(repo_full_name or ""):
@@ -402,6 +405,8 @@ class TreeFleetClient:
             pr_number=number,
             pr_text=_pr_text(info),
             head_sha=str(info.get("head_sha") or ""),
+            include_base=include_base,
+            include_repo=include_repo,
         )
         if result.get("error"):
             return result
@@ -433,6 +438,8 @@ class TreeFleetClient:
         pr_number: int | None,
         pr_text: str,
         head_sha: str,
+        include_base: bool = True,
+        include_repo: bool = True,
     ) -> dict:
         secret = load_token()
         chosen = model or self.default_model
@@ -443,10 +450,13 @@ class TreeFleetClient:
             "goal": goal,
             "worker_model": chosen,
             "plan_approval": False,
-            "base_ref": branch,
-            "pr_base": branch,
-            "repo": repo_full_name,
         }
+        # Ablation omits these so the running board uses its own checkout.
+        if include_base:
+            body["base_ref"] = branch
+            body["pr_base"] = branch
+        if include_repo:
+            body["repo"] = repo_full_name
         try:
             response = await self._request("POST", "/api/runs", body, secret)
         except httpx.HTTPError:

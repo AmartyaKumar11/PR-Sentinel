@@ -1,0 +1,3 @@
+condition,n,success,acceptance,time_mean_sd,files_mean_sd,added_mean_sd,removed_mean_sd,mergeable
+A/cursor,1,1/1,1/1,60.81 ± n/a,2.00 ± n/a,24.00 ± n/a,0.00 ± n/a,1/1
+A/treefleet,1,0/1,0/0,n/a,n/a,n/a,n/a,0/0
