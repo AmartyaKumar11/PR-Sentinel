@@ -289,4 +289,23 @@ class CursorClient:
         return {"status": "running"}
 
 
-cursor = CursorClient()
+def launch_refusal(result: dict) -> str | None:
+    """TreeFleet returns this when the pull request cannot be launched. Cursor never does."""
+    if isinstance(result, dict) and result.get("error") == "pr_not_launchable":
+        return str(result.get("reason") or "")
+    return None
+
+
+def build_backend():
+    """cursor unless PR_SENTINEL_BACKEND=treefleet. Unknown values fail closed."""
+    name = (settings.PR_SENTINEL_BACKEND or "cursor").strip().lower()
+    if name in {"", "cursor"}:
+        return CursorClient()
+    if name == "treefleet":
+        from app.services.treefleet_client import TreeFleetClient
+
+        return TreeFleetClient()
+    raise RuntimeError("PR_SENTINEL_BACKEND must be 'cursor' or 'treefleet'")
+
+
+cursor = build_backend()

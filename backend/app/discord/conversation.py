@@ -11,7 +11,8 @@ import uuid
 from app.agent.prompts import DISCORD_AGENT_PROMPT
 from app.config import settings
 from app.database import get_db
-from app.services.cursor_client import cursor, format_status_reply, model_label
+from app.services.cursor_client import cursor, format_status_reply, launch_refusal, model_label
+from app.services.treefleet_client import CANCEL_FALLBACK
 from app.discord.views import merge_with_conflict_resolution, parse_pr_url, pr_url_for_task
 from app.services.github_client import GitHubClient
 from app.services.task_manager import accept_task, get_health_stats, update_task_status
@@ -559,7 +560,9 @@ async def _stop(task: dict | None) -> str:
         usage = (await cursor.get_run_status(agent_id)).get("token_usage")
     except Exception:
         logger.warning("cursor status before stop failed", exc_info=True)
-    await cursor.cancel_agent(agent_id)
+    confirmed = await cursor.cancel_agent(agent_id)
+    if not confirmed:
+        return f"Could not stop `{agent_id}`. {CANCEL_FALLBACK}"
     try:
         await update_task_status(await get_db(), task["id"], "dismissed")
     except ValueError:
@@ -600,6 +603,9 @@ async def _launch(task: dict | None, params: dict, channel=None) -> str:
         result = await cursor.launch_on_pull(
             task["repo"], int(task["pr_number"]), prompt, model=params.get("model")
         )
+    reason = launch_refusal(result)
+    if reason is not None:
+        return f"Can't launch agent — {reason}"
     db = await get_db()
     await db.execute(
         "UPDATE tasks SET cursor_agent_id = ?, fix_attempts = ? WHERE id = ?",
@@ -611,7 +617,10 @@ async def _launch(task: dict | None, params: dict, channel=None) -> str:
         from app.discord.views import monitor_agent
 
         asyncio.create_task(monitor_agent(result["agent_id"], channel, task["id"]))
-    return f"Launched `{result['agent_id']}` with {model_label(result['model'])}."
+    line = f"Launched `{result['agent_id']}` with {model_label(result['model'])}."
+    if result.get("note"):
+        line += f" {result['note']}"
+    return line
 
 
 async def _resume(task: dict | None, message: str) -> str:

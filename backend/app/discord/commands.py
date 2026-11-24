@@ -11,6 +11,7 @@ from app.discord.conversation import format_prompt_history
 from app.discord.views import merge_with_conflict_resolution, owner_only, parse_pr_url, pr_url_for_task
 from app.database import get_db
 from app.services.cursor_client import cursor, format_status_reply, model_label
+from app.services.treefleet_client import CANCEL_FALLBACK
 from app.services.github_client import GitHubClient
 from app.services.task_manager import update_task_status
 
@@ -69,7 +70,12 @@ async def setup_commands(bot):
                 usage = (await cursor.get_run_status(task["cursor_agent_id"])).get("token_usage")
             except Exception:
                 logger.warning("status before stop failed", exc_info=True)
-            await cursor.cancel_agent(task["cursor_agent_id"])
+            confirmed = await cursor.cancel_agent(task["cursor_agent_id"])
+            if not confirmed:
+                await interaction.followup.send(
+                    f"⏹️ Could not stop `{task['cursor_agent_id']}`. {CANCEL_FALLBACK}"
+                )
+                return
             try:
                 await update_task_status(db, task["id"], "dismissed")
             except ValueError:

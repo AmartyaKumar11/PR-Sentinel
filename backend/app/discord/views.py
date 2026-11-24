@@ -11,7 +11,7 @@ import discord
 
 from app.config import settings
 from app.database import get_db
-from app.services.cursor_client import cursor, format_progress, model_label
+from app.services.cursor_client import cursor, format_progress, launch_refusal, model_label
 from app.services.github_client import GitHubClient, is_merge_conflict
 from app.services.task_manager import (
     accept_task,
@@ -361,7 +361,7 @@ async def monitor_agent(agent_id: str, channel, task_id: str) -> None:
             except Exception:
                 logger.exception("head sha after agent failed task=%s", task_id)
                 info = {"head_sha": before_sha, "branch": branch, "url": pr_url}
-            status["pr_url"] = info.get("url") or pr_url
+            status["pr_url"] = status.get("pr_url") or info.get("url") or pr_url
             status["branch"] = info.get("branch") or branch
             status["pushed_to_pr"] = task["pr_number"]
             if before_sha and info.get("head_sha") == before_sha:
@@ -576,19 +576,26 @@ async def _approve_fix(interaction: discord.Interaction, task_id: str) -> None:
     result = await cursor.launch_on_pull(
         task["repo"], int(task["pr_number"]), task.get("composer_prompt") or ""
     )
+    reason = launch_refusal(result)
+    if reason is not None:
+        await interaction.followup.send(f"⚠️ Can't launch agent — {reason}", ephemeral=True)
+        return
     await db.execute(
         "UPDATE tasks SET cursor_agent_id = ?, fix_attempts = ? WHERE id = ?",
         (result["agent_id"], 1, task_id),
     )
     await db.commit()
-    await interaction.followup.send(
+    text = (
         f"🚀 Cursor Cloud Agent launched!\n"
         f"**Agent ID:** `{result['agent_id']}`\n"
         f"**Model:** {model_label(result['model'])}\n"
         f"**Branch:** `{result['branch']}`\n"
-        f"**PR:** {result['pr_url']}\n\n"
+        f"**PR:** {result.get('pr_url') or 'not yet'}\n\n"
         f"Use `/status` to check progress, `/stop` to cancel."
     )
+    if result.get("note"):
+        text += f"\n{result['note']}"
+    await interaction.followup.send(text)
     asyncio.create_task(monitor_agent(result["agent_id"], interaction.channel, task_id))
 
 
@@ -791,14 +798,19 @@ async def _relaunch(interaction: discord.Interaction, task_id: str) -> None:
     result = await cursor.launch_on_pull(
         task["repo"], int(task["pr_number"]), task.get("composer_prompt") or ""
     )
+    reason = launch_refusal(result)
+    if reason is not None:
+        await interaction.followup.send(f"⚠️ Can't launch agent — {reason}", ephemeral=True)
+        return
     await db.execute(
         "UPDATE tasks SET cursor_agent_id = ? WHERE id = ?",
         (result["agent_id"], task_id),
     )
     await db.commit()
-    await interaction.followup.send(
-        f"🔄 Re-launched agent `{result['agent_id']}` with model {model_label(result['model'])}"
-    )
+    text = f"🔄 Re-launched agent `{result['agent_id']}` with model {model_label(result['model'])}"
+    if result.get("note"):
+        text += f"\n{result['note']}"
+    await interaction.followup.send(text)
     asyncio.create_task(monitor_agent(result["agent_id"], interaction.channel, task_id))
 
 
@@ -838,6 +850,9 @@ async def _launch_retry(channel, task_id: str, status: dict, gate: dict, attempt
         result = await cursor.launch_on_pull(task["repo"], int(task["pr_number"]), retry_prompt)
     except Exception:
         logger.exception("retry launch failed task=%s", task_id)
+        return None
+    if launch_refusal(result) is not None:
+        logger.warning("retry launch refused task=%s", task_id)
         return None
     next_attempt = attempt + 1
     history = append_prompt_history(

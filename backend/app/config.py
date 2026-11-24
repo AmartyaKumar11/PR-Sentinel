@@ -40,6 +40,12 @@ class Settings(BaseSettings):
     CURSOR_API_KEY: str = ""
     CURSOR_DEFAULT_MODEL: str = "auto"
 
+    # cursor (default) keeps today's Cloud Agent path. treefleet posts to a local board.
+    PR_SENTINEL_BACKEND: str = "cursor"
+    TREEFLEET_BASE_URL: str = "http://127.0.0.1:8765"
+    TREEFLEET_TOKEN_FILE: str = "/var/lib/treefleet/ui.token"
+    TREEFLEET_UI_TOKEN: str = ""
+
     @property
     def cors_origins(self) -> list[str]:
         return [o.strip() for o in self.ALLOWED_ORIGINS.split(",") if o.strip()]
